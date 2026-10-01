@@ -2,3 +2,5 @@
 # Install a CPU-only PyTorch build for this Python version first; never upgrade
 # the existing ECAPA/BandIt runtime.
 pyannote.audio>=4.0,<5
+# TorchCodec shares PyTorch's C++ ABI; 0.10 is the compatible release for torch 2.10.
+torchcodec>=0.10,<0.11
