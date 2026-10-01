@@ -1,0 +1,28 @@
+# Isolated local model runtime (Python 3.13.x on the verified Windows host).
+# The CUDA index is only needed for the CUDA wheels below; CPU-only Torch may
+# be substituted for a CPU deployment after a fresh benchmark.
+--extra-index-url https://download.pytorch.org/whl/cu126
+
+torch==2.14.0+cu126
+torchaudio==2.11.0+cu126
+numpy==2.2.6
+scipy==1.17.1
+soundfile==0.14.0
+
+# Source-verified inference-only BandIt bridge.  The same commit is vendored
+# under work/model-runtime/vendor/bandit-infer for offline inspection.
+bandit-infer @ git+https://github.com/openmirlab/bandit-infer.git@7ec03cb568811958db65a96a10fdb8879922b2ac
+
+# Public, no-token speaker embedding and deterministic clustering.
+speechbrain==1.1.1
+scikit-learn==1.9.1
+librosa==0.11.0
+numba==0.67.0
+llvmlite==0.49.0
+sentencepiece==0.2.2
+HyperPyYAML==1.2.3
+huggingface-hub==0.33.0
+
+# Official model records used by this project:
+# BandIt v1 v1-mus64-l1snr (CC-BY-NC-4.0), Zenodo record 10160698.
+# ECAPA: speechbrain/spkrec-ecapa-voxceleb (public Hugging Face model; no token).

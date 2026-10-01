@@ -1,0 +1,4 @@
+# Install only into work/model-runtime/pyannote-community-1/venv.
+# Install a CPU-only PyTorch build for this Python version first; never upgrade
+# the existing ECAPA/BandIt runtime.
+pyannote.audio>=4.0,<5

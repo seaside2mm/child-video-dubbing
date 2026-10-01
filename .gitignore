@@ -1,0 +1,23 @@
+# Local secrets, media, models and generated project state
+.env
+.env.*
+!.env.example
+work/
+outputs/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+node_modules/
+frontend/dist/
+*.log
+*.sqlite*
+*.db
+*.mp4
+*.wav
+*.mp3
+*.safetensors
+*.pt
+*.pth
