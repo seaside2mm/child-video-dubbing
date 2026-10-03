@@ -29,6 +29,8 @@ def make_adapter() -> faster_whisper.FasterWhisperAdapter:
 def test_ensure_model_loaded_accepts_explicit_already_loaded_conflict(monkeypatch, response):
     requests = []
 
+    monkeypatch.setattr(faster_whisper.httpx, "get", lambda *_args, **_kwargs: httpx.Response(404))
+
     def fake_post(url, **kwargs):
         requests.append(url)
         return response
@@ -41,6 +43,7 @@ def test_ensure_model_loaded_accepts_explicit_already_loaded_conflict(monkeypatc
 
 
 def test_ensure_model_loaded_does_not_hide_other_conflicts(monkeypatch):
+    monkeypatch.setattr(faster_whisper.httpx, "get", lambda *_args, **_kwargs: httpx.Response(404))
     monkeypatch.setattr(
         faster_whisper.httpx,
         "post",
@@ -54,10 +57,25 @@ def test_ensure_model_loaded_does_not_hide_other_conflicts(monkeypatch):
     assert error.value.details["detail"] == "Model load conflict"
 
 
+def test_ensure_model_loaded_skips_reloading_a_model_reported_active(monkeypatch):
+    requests = []
+    monkeypatch.setattr(
+        faster_whisper.httpx,
+        "get",
+        lambda url, **kwargs: requests.append(url) or httpx.Response(200, json={"models": ["Systran/faster-whisper-large-v3"]}),
+    )
+    monkeypatch.setattr(faster_whisper.httpx, "post", lambda *_args, **_kwargs: pytest.fail("active model must not be reloaded"))
+
+    make_adapter().ensure_model_loaded()
+
+    assert requests == ["http://speaches.test/api/ps"]
+
+
 def test_transcribe_encodes_multipart_fields_as_mapping(tmp_path, monkeypatch):
     audio_path = tmp_path / "spoken.wav"
     audio_path.write_bytes(b"wav-data")
     requests = []
+    monkeypatch.setattr(faster_whisper.httpx, "get", lambda *_args, **_kwargs: httpx.Response(404))
 
     def fake_post(url, **kwargs):
         if "/api/ps/" in url:

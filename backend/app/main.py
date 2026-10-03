@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import mimetypes
+import math
 import shutil
 import threading
 import time
@@ -111,6 +112,10 @@ class SeparationImport(BaseModel):
     effects_path: str | None = None
     background_path: str | None = None
     song_intervals: list[dict[str, float]] = Field(default_factory=list)
+
+
+class SongIntervalsPatch(BaseModel):
+    intervals: list[dict[str, float]]
 
 
 class Runtime:
@@ -521,9 +526,34 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
             _error(409, "SEPARATION_BACKGROUND_MISSING", "必须提供 background 或 music+effects，不能用原混音冒充", "重新导入已分离轨")
         background = Path(copied["background"]) if copied["background"] else SeparationAdapter(app_settings)._mix_background(Path(copied["music"]), Path(copied["effects"]), work_dir / "background.wav")
         metadata = load(project.get("metadata_json"), {})
-        metadata["separation"] = {"speech": copied["speech"], "music": copied["music"], "effects": copied["effects"], "background": str(background), "manifest": None, "song_intervals": payload.song_intervals, "imported": True}
+        metadata["separation"] = {"speech": copied["speech"], "music": copied["music"], "effects": copied["effects"], "background": str(background), "manifest": None, "song_intervals": payload.song_intervals, "song_intervals_override": payload.song_intervals, "imported": True}
         Pipeline(app_settings, app_db).invalidate(project_id, "transcribe")
         app_db.update("projects", {"metadata_json": dump(metadata), "checkpoint_json": dump({"completed_stages": ["probe", "separate"]}), "current_stage": "transcribe", "status": "created", "status_message": "已导入真实分离轨；等待句级转写", "updated_at": now_iso()}, "id = ?", (project_id,))
+        return project_row(app_db.fetchone("SELECT * FROM projects WHERE id = ?", (project_id,)) or {})
+
+    @app.put("/api/projects/{project_id}/song-intervals")
+    def set_song_intervals(project_id: str, payload: SongIntervalsPatch) -> dict[str, Any]:
+        project = app_db.fetchone("SELECT * FROM projects WHERE id = ?", (project_id,))
+        if not project:
+            _error(404, "PROJECT_NOT_FOUND", "项目不存在")
+        metadata = load(project.get("metadata_json"), {})
+        separation = metadata.get("separation") or {}
+        if not separation.get("speech") or not separation.get("background"):
+            _error(409, "SEPARATION_REQUIRED", "请先完成真实对白与背景分离，再设置歌曲区间")
+        intervals: list[dict[str, float]] = []
+        duration = float(project.get("duration") or 0)
+        for item in payload.intervals:
+            start, end = float(item.get("start", math.nan)), float(item.get("end", math.nan))
+            if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start or (duration > 0 and end > duration):
+                _error(422, "SONG_INTERVAL_INVALID", "歌曲区间必须是视频时长内有效的 start/end 时间")
+            intervals.append({"start": start, "end": end})
+        Pipeline(app_settings, app_db).invalidate(project_id, "transcribe")
+        project = app_db.fetchone("SELECT * FROM projects WHERE id = ?", (project_id,)) or project
+        metadata = load(project.get("metadata_json"), {})
+        separation = metadata.get("separation") or {}
+        separation["song_intervals_override"] = intervals
+        metadata["separation"] = separation
+        app_db.update("projects", {"metadata_json": dump(metadata), "checkpoint_json": dump({"completed_stages": ["probe", "separate"]}), "current_stage": "transcribe", "status_message": "歌曲区间已更新；等待重新转写", "updated_at": now_iso()}, "id = ?", (project_id,))
         return project_row(app_db.fetchone("SELECT * FROM projects WHERE id = ?", (project_id,)) or {})
 
     @app.get("/api/projects/{project_id}/preview")

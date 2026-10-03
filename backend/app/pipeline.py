@@ -235,13 +235,18 @@ class Pipeline:
         transcript_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         self.db.execute("DELETE FROM segments WHERE project_id = ?", (project["id"],))
         intervals = separation.get("song_intervals") or []
+        manual_intervals = separation.get("song_intervals_override") or []
         now = now_iso()
         values = []
         for index, item in enumerate(result.get("segments") or []):
             start, end = float(item["start"]), float(item["end"])
             overlap = max((min(end, float(song["end"])) - max(start, float(song["start"]))) for song in intervals) if intervals else 0
-            kind = "song" if overlap > max(0.1, (end - start) * 0.35) else "dialogue"
-            values.append((new_id("segment"), project["id"], index, start, end, None, None, kind, str(item["text"]), None, series.get("target_language"), series.get("speed"), None, None, None, None, "pending", 1, 1, None, dump({"words": item.get("words") or []}), now, now))
+            manual_start = any(float(song["start"]) <= start < float(song["end"]) for song in manual_intervals)
+            kind = "song" if overlap > max(0.1, (end - start) * 0.35) or manual_start else "dialogue"
+            segment_metadata = {"words": item.get("words") or []}
+            if manual_start:
+                segment_metadata["song_interval_override"] = True
+            values.append((new_id("segment"), project["id"], index, start, end, None, None, kind, str(item["text"]), None, series.get("target_language"), series.get("speed"), None, None, None, None, "pending", 1, 1, None, dump(segment_metadata), now, now))
         if values:
             self.db.executemany(
                 "INSERT INTO segments (id, project_id, segment_index, start_sec, end_sec, speaker_key, speaker_name, kind, source_text, target_text, target_language, speed, duration_delta, voice_profile, audio_path, audio_sha256, status, source_revision, target_revision, error_message, metadata_json, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -266,11 +271,30 @@ class Pipeline:
         _run([str(runtime), str(script), "--input", str(original_audio), "--output", str(output)], timeout=300)
         detection = json.loads(output.read_text(encoding="utf-8"))
         separation = context["metadata"]["separation"]
-        separation["song_intervals"] = detection["song_intervals"]
-        separation["song_detection"] = {"status": detection["status"], "model": detection["model"], "evidence": str(output)}
+        detected_intervals = detection["song_intervals"]
+        manual_intervals = separation.get("song_intervals_override") or []
+        separation["song_intervals_detected"] = detected_intervals
+        separation["song_intervals"] = self._merge_song_intervals([*detected_intervals, *manual_intervals])
+        separation["song_detection"] = {"status": detection["status"], "model": detection["model"], "evidence": str(output), "manual_override_count": len(manual_intervals)}
         if detection["status"] == "low_confidence":
             self._record_anomaly(project["id"], None, "SONG_DETECTION_UNCERTAIN", "warning", False,
                                  "存在接近阈值的歌唱事件；请复核歌曲边界", "试听候选片段", {"evidence": str(output)})
+
+    @staticmethod
+    def _merge_song_intervals(intervals: list[dict[str, Any]]) -> list[dict[str, float]]:
+        normalized: list[dict[str, float]] = []
+        for item in intervals:
+            start, end = float(item["start"]), float(item["end"])
+            if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start:
+                raise BlockedError("SONG_INTERVAL_INVALID", "歌曲区间存在无效时间，拒绝混音")
+            normalized.append({"start": start, "end": end})
+        merged: list[dict[str, float]] = []
+        for item in sorted(normalized, key=lambda interval: interval["start"]):
+            if merged and item["start"] <= merged[-1]["end"]:
+                merged[-1]["end"] = max(merged[-1]["end"], item["end"])
+            else:
+                merged.append(item)
+        return merged
 
     def _diarize(self, context: dict[str, Any]) -> None:
         project = context["project"]
