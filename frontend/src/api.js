@@ -100,6 +100,10 @@ export const api = {
     method: "POST",
     body: JSON.stringify(fromStage ? { from_stage: fromStage } : {}),
   }),
+  confirmStage: (projectId, stage, payload) => request(`/api/projects/${pathPart(projectId)}/stages/${pathPart(stage)}/confirm`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  }),
   getJob: (jobId) => request(`/api/jobs/${pathPart(jobId)}`),
   listSegments: async (projectId) => normalizeList(await request(`/api/projects/${pathPart(projectId)}/segments`)),
   listAnomalies: async (projectId) => normalizeList(await request(`/api/projects/${pathPart(projectId)}/anomalies`)),

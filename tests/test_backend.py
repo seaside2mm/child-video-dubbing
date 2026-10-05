@@ -51,10 +51,12 @@ def test_real_media_import_preserves_source_and_queue_does_not_fake_success(tmp_
         job_id = queued.json()["id"]
         for _ in range(30):
             job = client.get(f"/api/jobs/{job_id}").json()
-            if job["status"] in {"blocked", "failed", "completed", "completed_with_warnings"}:
+            if job["status"] in {"awaiting_confirmation", "blocked", "failed", "completed", "completed_with_warnings"}:
                 break
             time.sleep(0.1)
-        assert job["status"] == "blocked"
+        assert job["status"] == "awaiting_confirmation"
+        assert job["stage"] == "probe"
+        assert client.get(f"/api/projects/{project['id']}").json()["checkpoint"]["pending_confirmation_stage"] == "probe"
         assert client.post(f"/api/projects/{project['id']}/export", json={}).status_code == 409
         assert source.read_bytes() == original_bytes
 

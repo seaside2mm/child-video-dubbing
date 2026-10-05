@@ -43,7 +43,7 @@ RECOVERABLE_STAGE_ANOMALIES: dict[str, set[str]] = {
     "diarize": {"DIARIZATION_NO_OUTPUT", "DIARIZATION_INVALID_OUTPUT", "DIARIZATION_NOT_CONFIGURED", "DIARIZATION_EMPTY", "PYANNOTE_MISSING", "NO_SPEAKER_SEGMENTS"},
     "characters": {"NO_SPEAKER_SEGMENTS"},
     "rewrite": {"TEXT_API_NOT_CONFIGURED", "TEXT_API_UNAVAILABLE", "TEXT_API_FAILED", "TEXT_API_INVALID_RESPONSE", "REWRITER_INVALID_JSON", "REWRITER_INVALID_SHAPE", "REWRITER_COUNT_MISMATCH", "REWRITER_ID_MISMATCH", "REWRITER_EMPTY_TEXT", "REWRITER_OVER_BUDGET"},
-    "synthesize": {"VOICE_PROFILE_MISSING", "OMNIVOICE_OPENAPI_UNAVAILABLE", "OMNIVOICE_OPENAPI_FAILED", "OMNIVOICE_OPENAPI_INVALID", "OMNIVOICE_PROFILE_UNSUPPORTED", "OMNIVOICE_PROFILE_UPLOAD_FAILED", "OMNIVOICE_PROFILE_UPLOAD_INVALID", "OMNIVOICE_PROFILE_CREATE_FAILED", "OMNIVOICE_PROFILE_CREATE_INVALID", "OMNIVOICE_PROFILE_EVENT_FAILED", "OMNIVOICE_PROFILE_EVENT_EMPTY", "OMNIVOICE_PROFILE_EVENT_INVALID", "OMNIVOICE_PROFILE_VERIFY_FAILED", "OMNIVOICE_EMPTY_TEXT", "OMNIVOICE_TTS_FAILED", "OMNIVOICE_TTS_INVALID", "OMNIVOICE_TTS_EMPTY", "OMNIVOICE_TTS_AUDIO_FETCH_FAILED", "TTS_OVER_DURATION", "TTS_NO_OUTPUT"},
+    "synthesize": {"VOICE_PROFILE_MISSING", "OMNIVOICE_OPENAPI_UNAVAILABLE", "OMNIVOICE_OPENAPI_FAILED", "OMNIVOICE_OPENAPI_INVALID", "OMNIVOICE_PROFILE_UNSUPPORTED", "OMNIVOICE_PROFILE_UPLOAD_FAILED", "OMNIVOICE_PROFILE_UPLOAD_INVALID", "OMNIVOICE_PROFILE_CREATE_FAILED", "OMNIVOICE_PROFILE_CREATE_INVALID", "OMNIVOICE_PROFILE_EVENT_FAILED", "OMNIVOICE_PROFILE_EVENT_EMPTY", "OMNIVOICE_PROFILE_EVENT_INVALID", "OMNIVOICE_PROFILE_VERIFY_FAILED", "OMNIVOICE_EMPTY_TEXT", "OMNIVOICE_TTS_FAILED", "OMNIVOICE_TTS_INVALID", "OMNIVOICE_TTS_EMPTY", "OMNIVOICE_TTS_AUDIO_FETCH_FAILED", "SEGMENT_WINDOW_TOO_SHORT", "TTS_OVER_DURATION", "TTS_NO_OUTPUT"},
     "mix": {"BACKGROUND_TRACK_MISSING", "SEGMENT_AUDIO_MISSING", "SEGMENT_AUDIO_OVERLAP", "NO_DIALOGUE_AUDIO", "NO_SYNTHESIS_AUDIO", "MEDIA_OUTPUT_EMPTY"},
     "export": {"EXPORT_INPUT_MISSING", "EXPORT_TRUNCATED", "EXPORT_EMPTY"},
 }
@@ -96,10 +96,14 @@ class Pipeline:
             self._set_job(job["id"], status="cancelled", message="任务已取消", completed_at=now_iso())
             self._set_project(project["id"], status="paused", status_message="任务已取消；已保留已有缓存")
         except BlockedError as exc:
-            self._record_anomaly(project["id"], None, exc.code, "blocking", True, exc.message, exc.action, exc.details)
+            details = dict(exc.details) if isinstance(exc.details, dict) else {}
+            details.setdefault("stage", job.get("stage"))
+            self._record_anomaly(project["id"], None, exc.code, "blocking", True, exc.message, exc.action, details)
             self._fail_job(job, exc.code, exc.message, blocked=True)
         except AdapterError as exc:
-            self._record_anomaly(project["id"], None, exc.code, "blocking", True, exc.message, exc.action, exc.details)
+            details = dict(exc.details) if isinstance(exc.details, dict) else {}
+            details.setdefault("stage", job.get("stage"))
+            self._record_anomaly(project["id"], None, exc.code, "blocking", True, exc.message, exc.action, details)
             self._fail_job(job, exc.code, exc.message, blocked=True)
         except Exception as exc:  # keep a worker crash from leaving running forever
             self._record_anomaly(project["id"], None, "PIPELINE_UNEXPECTED", "blocking", True, "处理流程发生未预期错误", "查看后端日志并重试", {"type": exc.__class__.__name__, "stage": job.get("stage")})
@@ -110,12 +114,19 @@ class Pipeline:
         if not isinstance(checkpoint, dict):
             checkpoint = {}
         completed = set(checkpoint.get("completed_stages") or [])
+        pending_stage = checkpoint.get("pending_confirmation_stage")
+        if pending_stage in STAGES:
+            self._save_awaiting_confirmation(job, project, load(project.get("metadata_json"), {}), checkpoint, pending_stage)
+            return
         from_stage = str(job.get("from_stage") or "auto")
         if int(job.get("force") or 0) or from_stage != "auto":
             start = 0 if from_stage in {"auto", "", "probe"} and int(job.get("force") or 0) else self._stage_index(from_stage)
             self.invalidate(project["id"], STAGES[start])
-            completed = {stage for stage in completed if self._stage_index(stage) < start}
-            checkpoint["completed_stages"] = sorted(completed, key=self._stage_index)
+            project = self.db.fetchone("SELECT * FROM projects WHERE id = ?", (project["id"],)) or project
+            checkpoint = load(project.get("checkpoint_json"), {})
+            if not isinstance(checkpoint, dict):
+                checkpoint = {}
+            completed = set(checkpoint["completed_stages"])
         # Do not retain a downstream checkpoint when an earlier artifact is
         # missing or invalid after a crash/restart.
         metadata = load(project.get("metadata_json"), {})
@@ -130,27 +141,37 @@ class Pipeline:
         if first_invalid is not None:
             self.invalidate(project["id"], STAGES[first_invalid])
             project = self.db.fetchone("SELECT * FROM projects WHERE id = ?", (project["id"],)) or project
-            completed = {stage for stage in completed if self._stage_index(stage) < first_invalid}
-            checkpoint["completed_stages"] = sorted(completed, key=self._stage_index)
+            checkpoint = load(project.get("checkpoint_json"), {})
+            if not isinstance(checkpoint, dict):
+                checkpoint = {}
+            completed = set(checkpoint["completed_stages"])
         self._set_project(project["id"], status="processing", status_message="任务已开始")
         self._set_job(job["id"], status="running", stage=STAGES[min(len(completed), len(STAGES) - 1)], message="正在恢复可用缓存")
         context = {"project": project, "metadata": load(project.get("metadata_json"), {})}
         for index, stage in enumerate(STAGES):
             self._check_cancel()
             if stage in completed and self._stage_artifact_valid(stage, context):
+                if stage not in checkpoint.get("confirmed_stages", []):
+                    self._save_awaiting_confirmation(job, project, context["metadata"], checkpoint, stage)
+                    return
                 continue
             stage_message = self._stage_message(stage)
             self._set_job(job["id"], stage=stage, progress=index / len(STAGES), message=stage_message)
             self._set_project(project["id"], current_stage=stage, progress=index / len(STAGES), status="processing", status_message=stage_message)
             self.progress(stage, index / len(STAGES), stage_message)
             self._run_stage(stage, context)
+            context["project"] = self.db.fetchone("SELECT * FROM projects WHERE id = ?", (project["id"],)) or context["project"]
+            if not self._stage_artifact_valid(stage, context):
+                message = f"{stage} 阶段产物缺失或无效"
+                self._record_anomaly(project["id"], None, "STAGE_ARTIFACT_INVALID", "blocking", True, message, "检查本阶段输出后重新处理", {"stage": stage})
+                raise BlockedError("STAGE_ARTIFACT_INVALID", message, "检查本阶段输出后重新处理", {"stage": stage})
             self._resolve_stage_anomalies(project["id"], stage)
             completed.add(stage)
             checkpoint["completed_stages"] = sorted(completed, key=self._stage_index)
             context["metadata"] = context.get("metadata") or {}
-            self._persist_context(project["id"], context["metadata"], checkpoint)
-            self._set_project(project["id"], current_stage=stage, progress=(index + 1) / len(STAGES), status="processing", status_message=f"{stage} 已完成")
-            self._set_job(job["id"], checkpoint_json=dump(checkpoint), progress=(index + 1) / len(STAGES), message=f"{stage} 已完成")
+            checkpoint.setdefault("stage_revisions", {}).setdefault(stage, 1)
+            self._save_awaiting_confirmation(job, project, context["metadata"], checkpoint, stage, progress=(index + 1) / len(STAGES))
+            return
         blocking = self.db.fetchone("SELECT COUNT(*) AS count FROM anomalies WHERE project_id = ? AND blocking = 1 AND resolved = 0", (project["id"],))
         warning_count = self.db.fetchone("SELECT COUNT(*) AS count FROM anomalies WHERE project_id = ? AND resolved = 0", (project["id"],))
         if int((blocking or {}).get("count") or 0):
@@ -170,12 +191,65 @@ class Pipeline:
         self._set_job(job["id"], status="running", stage="synthesize", progress=0.1, message="正在生成句级音频")
         context = {"project": project, "metadata": load(project.get("metadata_json"), {})}
         self._synthesize_segments(project, [segment])
-        self._mix_export_dependencies(project, context)
-        blocking = self.db.fetchone("SELECT COUNT(*) AS count FROM anomalies WHERE project_id = ? AND blocking = 1 AND resolved = 0", (project["id"],))
-        if int((blocking or {}).get("count") or 0):
-            raise BlockedError("PROJECT_BLOCKED", "项目仍有未解决的阻断异常", "先处理项目异常后再导出")
-        self._set_job(job["id"], status="completed_with_warnings", stage="done", progress=1, message="句级配音及相关成片缓存已更新", completed_at=now_iso())
-        self._set_project(project["id"], status="completed_with_warnings", current_stage="done", progress=1, status_message="句级配音已更新；请检查候选成片")
+        if not self._stage_artifact_valid("synthesize", context):
+            raise BlockedError("SYNTHESIS_INCOMPLETE", "仍有对白没有有效配音", "先补齐配音后再确认本阶段")
+        self._resolve_stage_anomalies(project["id"], "synthesize")
+        checkpoint = load(project.get("checkpoint_json"), {})
+        if not isinstance(checkpoint, dict):
+            checkpoint = {}
+        completed = set(checkpoint.get("completed_stages") or [])
+        completed.add("synthesize")
+        checkpoint["completed_stages"] = sorted(completed, key=self._stage_index)
+        checkpoint.setdefault("stage_revisions", {}).setdefault("synthesize", 1)
+        self._save_awaiting_confirmation(job, project, context["metadata"], checkpoint, "synthesize", progress=(self._stage_index("synthesize") + 1) / len(STAGES))
+
+    def _save_awaiting_confirmation(
+        self,
+        job: dict[str, Any],
+        project: dict[str, Any],
+        metadata: dict[str, Any],
+        checkpoint: dict[str, Any],
+        stage: str,
+        *,
+        progress: float | None = None,
+    ) -> None:
+        index = self._stage_index(stage)
+        checkpoint.setdefault("stage_revisions", {}).setdefault(stage, 1)
+        checkpoint["pending_confirmation_stage"] = stage
+        checkpoint["pending_confirmation_revision"] = int(checkpoint["stage_revisions"][stage])
+        value = progress if progress is not None else (index + 1) / len(STAGES)
+        now = now_iso()
+        with self.db.connect() as conn:
+            conn.execute(
+                "UPDATE projects SET metadata_json = ?, checkpoint_json = ?, current_stage = ?, progress = ?, status = 'awaiting_confirmation', status_message = ?, updated_at = ? WHERE id = ?",
+                (dump(metadata), dump(checkpoint), stage, value, f"{stage} 已完成，等待人工确认", now, project["id"]),
+            )
+            conn.execute(
+                "UPDATE jobs SET checkpoint_json = ?, stage = ?, progress = ?, status = 'awaiting_confirmation', message = ?, completed_at = NULL, updated_at = ? WHERE id = ?",
+                (dump(checkpoint), stage, value, f"{stage} 已完成，等待人工确认", now, job["id"]),
+            )
+
+    @classmethod
+    def _invalidate_confirmation_state(cls, checkpoint: dict[str, Any], from_stage: str, reason: str) -> dict[str, Any]:
+        start = cls._stage_index(from_stage)
+        now = now_iso()
+        history = checkpoint.setdefault("confirmation_history", [])
+        for record in history:
+            stage = record.get("stage")
+            if record.get("valid", True) and stage in STAGES and cls._stage_index(stage) >= start:
+                record.update({"valid": False, "invalidated_at": now, "invalidation_reason": reason})
+        checkpoint["confirmed_stages"] = [stage for stage in checkpoint.get("confirmed_stages", []) if stage in STAGES and cls._stage_index(stage) < start]
+        checkpoint["completed_stages"] = sorted(
+            (stage for stage in checkpoint.get("completed_stages", []) if stage in STAGES and cls._stage_index(stage) < start),
+            key=cls._stage_index,
+        )
+        revisions = checkpoint.setdefault("stage_revisions", {})
+        for stage in STAGES[start:]:
+            revisions[stage] = int(revisions.get(stage, 1)) + 1
+        if checkpoint.get("pending_confirmation_stage") in STAGES[start:]:
+            checkpoint.pop("pending_confirmation_stage", None)
+            checkpoint.pop("pending_confirmation_revision", None)
+        return checkpoint
 
     def _run_stage(self, stage: str, context: dict[str, Any]) -> None:
         project = context["project"]
@@ -669,6 +743,10 @@ class Pipeline:
         if not project:
             return
         metadata = load(project.get("metadata_json"), {})
+        checkpoint = load(project.get("checkpoint_json"), {})
+        if not isinstance(checkpoint, dict):
+            checkpoint = {}
+        checkpoint = self._invalidate_confirmation_state(checkpoint, from_stage, f"{from_stage} 阶段及下游重新处理")
         for stage in STAGES[index:]:
             metadata.pop({"probe": "probe", "separate": "separation", "transcribe": "transcript", "diarize": "diarization", "characters": "characters", "mix": "mixed", "subtitle": "subtitle_path", "export": "output"}.get(stage, stage), None)
         if index <= self._stage_index("transcribe"):
@@ -677,7 +755,23 @@ class Pipeline:
             self.db.execute("UPDATE segments SET audio_path = NULL, audio_sha256 = NULL, status = CASE WHEN kind = 'dialogue' THEN 'rewritten' ELSE status END, duration_delta = NULL WHERE project_id = ?", (project_id,))
         if index <= self._stage_index("rewrite"):
             self.db.execute("UPDATE segments SET target_text = NULL, target_revision = target_revision + 1, status = CASE WHEN kind = 'dialogue' THEN 'pending' ELSE status END, updated_at = ? WHERE project_id = ?", (now_iso(), project_id))
-        self._set_project(project_id, metadata_json=dump(metadata), output_path=None, output_sha256=None, current_stage=from_stage, progress=0, status="created", status_message="相关缓存已失效")
+        pending = checkpoint.get("pending_confirmation_stage")
+        waiting = pending in STAGES and self._stage_index(pending) < index
+        now = now_iso()
+        progress = (self._stage_index(pending) + 1) / len(STAGES) if waiting else 0
+        status = "awaiting_confirmation" if waiting else "created"
+        message = f"{pending} 等待确认；下游缓存已失效" if waiting else "相关缓存已失效"
+        with self.db.connect() as conn:
+            conn.execute(
+                "UPDATE projects SET metadata_json = ?, checkpoint_json = ?, output_path = NULL, output_sha256 = NULL, current_stage = ?, progress = ?, status = ?, status_message = ?, updated_at = ? WHERE id = ?",
+                (dump(metadata), dump(checkpoint), pending if waiting else from_stage, progress, status, message, now, project_id),
+            )
+            waiting_job = conn.execute("SELECT * FROM jobs WHERE project_id = ? ORDER BY created_at DESC LIMIT 1", (project_id,)).fetchone()
+            if waiting_job and waiting_job["status"] == "awaiting_confirmation":
+                if waiting:
+                    conn.execute("UPDATE jobs SET checkpoint_json = ?, stage = ?, progress = ?, message = ?, updated_at = ? WHERE id = ?", (dump(checkpoint), pending, progress, f"{pending} 等待人工确认", now, waiting_job["id"]))
+                else:
+                    conn.execute("UPDATE jobs SET status = 'superseded', message = ?, completed_at = ?, updated_at = ? WHERE id = ?", ("阶段输入已修改，需要重新处理", now, now, waiting_job["id"]))
 
     @staticmethod
     def _stage_index(stage: str) -> int:
@@ -765,7 +859,7 @@ class Pipeline:
         """Resolve only blocking errors whose owning stage just succeeded."""
         recoverable = RECOVERABLE_STAGE_ANOMALIES.get(stage, set())
         rows = self.db.fetchall(
-            "SELECT id, kind, details_json FROM anomalies WHERE project_id = ? AND resolved = 0 AND blocking = 1",
+            "SELECT id, kind, details_json FROM anomalies WHERE project_id = ? AND resolved = 0 AND (blocking = 1 OR severity = 'blocking')",
             (project_id,),
         )
         for row in rows:
@@ -777,6 +871,10 @@ class Pipeline:
                 details = load(row.get("details_json"), {})
                 recorded_stage = details.get("stage") if isinstance(details, dict) else None
                 if (recorded_stage and recorded_stage != stage) or (not recorded_stage and stage != "transcribe"):
+                    continue
+            elif kind == "STAGE_ARTIFACT_INVALID":
+                details = load(row.get("details_json"), {})
+                if not isinstance(details, dict) or details.get("stage") != stage:
                     continue
             elif kind not in recoverable:
                 continue

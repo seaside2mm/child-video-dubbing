@@ -6,6 +6,7 @@ export function Projects({ data, onImport }) {
   const [drafts, setDrafts] = useState({});
   const project = data.selectedProject;
   const currentJob = data.jobs.find((job) => String(job.project_id) === String(project?.id)) || project?.current_job || project?.job;
+  const pendingStage = project?.pending_confirmation_stage || project?.checkpoint?.pending_confirmation_stage;
   useEffect(() => setDrafts({}), [project?.id]);
   const rows = useMemo(() => data.segments.map((segment) => ({ ...segment, ...drafts[segment.id] })), [data.segments, drafts]);
 
@@ -28,10 +29,10 @@ export function Projects({ data, onImport }) {
       </aside>
       <main className="segment-editor panel">
         {project ? <>
-          <div className="section-title segment-heading"><div><h2>{project.title || project.name || `项目 ${project.id}`}</h2><p>{project.source_path || project.source_filename || "源文件路径待读取"}</p></div><div className="segment-job-actions"><Button variant="secondary" onClick={start} disabled={active || !data.health.connected}>{active ? "处理中…" : "继续自动处理"}</Button>{active && <Button variant="ghost" onClick={cancel}>取消任务</Button>}</div></div>
+          <div className="section-title segment-heading"><div><h2>{project.title || project.name || `项目 ${project.id}`}</h2><p>{pendingStage ? `当前待确认：${stageName(pendingStage)}。确认后才会开始下一阶段。` : project.source_path || project.source_filename || "源文件路径待读取"}</p></div><div className="segment-job-actions"><Button variant="secondary" onClick={start} disabled={active || Boolean(pendingStage) || !data.health.connected}>{active ? "处理中…" : pendingStage ? `待确认：${stageName(pendingStage)}` : "继续任务"}</Button>{active && <Button variant="ghost" onClick={cancel}>取消任务</Button>}</div></div>
           <div className="segment-table-header"><span>时间 / 角色</span><span>原文</span><span>目标文本</span><span>语速</span><span>试听 / 操作</span></div>
           <div className="segment-list">
-            {rows.map((row) => <SegmentRow key={row.id} row={row} data={data} project={project} drafts={drafts} setDrafts={setDrafts} save={save}/>) }
+            {rows.map((row) => <SegmentRow key={row.id} row={row} data={data} project={project} pendingStage={pendingStage} drafts={drafts} setDrafts={setDrafts} save={save}/>) }
           </div>
           {!rows.length && <EmptyState title="尚无句级结果" text="先运行真实的检查、分离、转写与角色阶段。"/>}
         </> : <EmptyState title="请选择项目" text="登记视频后会在这里显示句级时间轴。"/>}
@@ -40,23 +41,31 @@ export function Projects({ data, onImport }) {
   </div>;
 }
 
-function SegmentRow({ row, data, project, drafts, setDrafts, save }) {
+function SegmentRow({ row, data, project, pendingStage, drafts, setDrafts, save }) {
   const options = [...data.characters];
   if (row.speaker_key && !options.some((item) => item.speaker_key === row.speaker_key)) options.push({ speaker_key: row.speaker_key, name: row.speaker_name || row.speaker_key });
   const speakerKey = row.speaker_key || "";
   const audioUrl = row.audio_url || (row.status === "synthesized" ? api.mediaUrl(project.id, `segment/${row.id}`) : "");
+  const canEditSpeaker = pendingStage === "characters";
+  const canEditText = pendingStage === "rewrite";
+  const canEditSpeed = pendingStage === "synthesize";
+  const canRegenerate = pendingStage === "synthesize" || (project.status === "completed" && (project.confirmed_stages || project.checkpoint?.confirmed_stages || []).length === 10);
   const update = (patch) => setDrafts((value) => ({ ...value, [row.id]: { ...value[row.id], ...patch } }));
   return <article className={`segment-row ${row.status === "failed" || row.status === "blocked" ? "exception" : ""}`}>
-    <div><strong>{formatTime(row.start)}–{formatTime(row.end)}</strong>{options.length ? <select aria-label={`片段 ${row.id} 角色`} value={speakerKey} onChange={(event) => update({ speaker_key: event.target.value })}><option value="">待匹配角色</option>{options.map((item) => <option key={item.speaker_key || item.id} value={item.speaker_key}>{item.name || item.speaker_key}</option>)}</select> : <input aria-label={`片段 ${row.id} 角色键`} value={speakerKey} placeholder="角色键" onChange={(event) => update({ speaker_key: event.target.value })}/>}</div>
+    <div><strong>{formatTime(row.start)}–{formatTime(row.end)}</strong>{options.length ? <select aria-label={`片段 ${row.id} 角色`} disabled={!canEditSpeaker} value={speakerKey} onChange={(event) => update({ speaker_key: event.target.value })}><option value="">待匹配角色</option>{options.map((item) => <option key={item.speaker_key || item.id} value={item.speaker_key}>{item.name || item.speaker_key}</option>)}</select> : <input aria-label={`片段 ${row.id} 角色键`} disabled={!canEditSpeaker} value={speakerKey} placeholder="角色键" onChange={(event) => update({ speaker_key: event.target.value })}/>}</div>
     <p>{row.source_text || row.original_text || "—"}</p>
-    <textarea aria-label={`片段 ${row.id} 目标文本`} value={row.target_text || ""} onChange={(event) => update({ target_text: event.target.value })}/>
-    <label><span className="sr-only">语速</span><input type="number" min="0.55" max="1.15" step="0.01" value={row.speed ?? project.speed ?? 0.82} onChange={(event) => update({ speed: Number(event.target.value) })}/><small>{row.duration_delta == null ? "未测时长" : `时长差 ${Number(row.duration_delta).toFixed(2)} 秒`}</small></label>
-    <div className="segment-actions">{audioUrl ? <audio controls preload="none" src={resolveUrl(audioUrl)} aria-label={`片段 ${row.id} 试听`}/> : <span className="audio-unavailable">尚无真实音频</span>}<Button variant="secondary" onClick={() => save(row)} disabled={!drafts[row.id]}>保存</Button><button className="text-button" onClick={() => data.act(() => api.regenerateSegment(project.id, row.id), "该句已请求重新生成；不会用旧缓存冒充新结果。")}>重生成</button></div>
+    <textarea aria-label={`片段 ${row.id} 目标文本`} disabled={!canEditText} value={row.target_text || ""} onChange={(event) => update({ target_text: event.target.value })}/>
+    <label><span className="sr-only">语速</span><input type="number" min="0.55" max="1.15" step="0.01" disabled={!canEditSpeed} value={row.speed ?? project.speed ?? 0.82} onChange={(event) => update({ speed: Number(event.target.value) })}/><small>{row.duration_delta == null ? "未测时长" : `时长差 ${Number(row.duration_delta).toFixed(2)} 秒`}</small></label>
+    <div className="segment-actions">{audioUrl ? <audio controls preload="none" src={resolveUrl(audioUrl)} aria-label={`片段 ${row.id} 试听`}/> : <span className="audio-unavailable">尚无真实音频</span>}<Button variant="secondary" onClick={() => save(row)} disabled={!drafts[row.id] || !((canEditText && Object.hasOwn(drafts[row.id], "target_text")) || (canEditSpeed && Object.hasOwn(drafts[row.id], "speed")) || (canEditSpeaker && Object.hasOwn(drafts[row.id], "speaker_key")))} title={pendingStage ? "本阶段修改保存后会使受影响的下游产物失效" : "仅在对应阶段待确认时可编辑"}>保存</Button><button className="text-button" disabled={!canRegenerate} onClick={() => data.act(() => api.regenerateSegment(project.id, row.id), "该句已重新生成；完成配音关确认后，才会继续混音等步骤。")}>重生成</button></div>
   </article>;
 }
 
 function statusText(value) {
-  return ({ created: "已登记", queued: "等待处理", running: "处理中", processing: "处理中", paused: "已暂停", completed: "已完成", completed_with_warnings: "完成但有告警", blocked: "被阻断", failed: "失败", cancelled: "已取消" })[value] || value || "未知状态";
+  return ({ created: "已登记", queued: "等待处理", running: "处理中", processing: "处理中", awaiting_confirmation: "待你确认", paused: "已暂停", completed: "已完成", completed_with_warnings: "完成但有告警", blocked: "被阻断", failed: "失败", cancelled: "已取消" })[value] || value || "未知状态";
+}
+
+function stageName(value) {
+  return ({ probe: "检查媒体", separate: "分离对白", transcribe: "句级转写", diarize: "角色聚类", characters: "准备音色", rewrite: "按等级改写", synthesize: "逐句配音", mix: "混音", subtitle: "生成字幕", export: "输出 MP4" })[value] || value;
 }
 
 function formatTime(value) {

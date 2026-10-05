@@ -3,13 +3,17 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 
+import pytest
+
 from backend.app.adapters import diarization
 from backend.app.adapters.diarization import DiarizationAdapter
 from backend.app.config import settings as default_settings
-from scripts.model_diarization import _transcript_windows
 
 
 def test_transcript_windows_keep_sentence_boundaries_and_skip_too_short_audio():
+    pytest.importorskip("numpy", reason="transcription model runtime dependency is optional")
+    from scripts.model_diarization import _transcript_windows
+
     segments = [
         {"start": 0.0, "end": 1.7, "text": "第一句"},
         {"start": 1.8, "end": 2.4, "text": "嗯"},
@@ -25,6 +29,9 @@ def test_transcript_windows_keep_sentence_boundaries_and_skip_too_short_audio():
 
 
 def test_long_asr_segment_is_split_without_crossing_its_transcript_index():
+    pytest.importorskip("numpy", reason="transcription model runtime dependency is optional")
+    from scripts.model_diarization import _transcript_windows
+
     windows = _transcript_windows(
         [{"start": 0, "end": 10, "text": "较长的一句"}],
         [(0, 100)],

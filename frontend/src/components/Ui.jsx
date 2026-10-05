@@ -32,14 +32,22 @@ export function ProgressSteps({ project, jobs }) {
     ["rewrite", "改写"], ["synthesize", "配音"], ["mix", "混音"], ["subtitle", "字幕"], ["export", "输出"],
   ];
   const job = jobs.find((item) => String(item.project_id) === String(project?.id));
-  const current = job?.stage || project?.current_stage || project?.stage || "probe";
-  const index = Math.max(steps.findIndex(([id]) => id === current), 0);
-  const complete = ["completed", "completed_with_warnings"].includes(project?.status) || job?.status === "completed";
+  const checkpoint = project?.checkpoint || {};
+  const confirmed = new Set(project?.confirmed_stages || checkpoint.confirmed_stages || []);
+  const completed = new Set(checkpoint.completed_stages || []);
+  const pending = project?.pending_confirmation_stage || checkpoint.pending_confirmation_stage;
+  const current = pending || (job?.stage === "done" ? "export" : job?.stage) || project?.current_stage || project?.stage || "probe";
+  const firstUnconfirmed = steps.find(([id]) => completed.has(id) && !confirmed.has(id))?.[0];
+  const inactive = !["queued", "running", "processing", "awaiting_confirmation"].includes(project?.status);
+  const currentStep = firstUnconfirmed && !pending && inactive ? firstUnconfirmed : current;
+  const index = Math.max(steps.findIndex(([id]) => id === currentStep), 0);
+  const complete = steps.every(([id]) => confirmed.has(id));
   const progress = Math.max(0, Math.min(1, Number(job?.progress ?? project?.progress ?? 0)));
   return <ol className="progress-steps" aria-label="处理进度">
     {steps.map(([id, label], stepIndex) => {
-      const state = complete || stepIndex < index ? "done" : stepIndex === Math.max(index, 0) ? "current" : "pending";
-      return <li key={id} className={state}><span>{state === "done" ? "✓" : stepIndex + 1}</span><strong>{label}</strong><small>{state === "done" ? "已完成" : state === "current" ? `${Math.round(progress * 100)}%` : "等待中"}</small></li>;
+      const state = confirmed.has(id) ? "done" : id === currentStep ? "current" : "pending";
+      const detail = state === "done" ? "已确认" : state === "current" ? pending === id ? "待确认" : ["queued", "running", "processing"].includes(job?.status) ? `${Math.round(progress * 100)}%` : completed.has(id) ? "待复核" : "当前" : completed.has(id) ? "待复核" : "未开始";
+      return <li key={id} className={`${state}${pending === id ? " awaiting" : ""}`}><span>{state === "done" ? "✓" : stepIndex + 1}</span><strong>{label}</strong><small>{complete && state !== "current" ? "已确认" : detail}</small></li>;
     })}
   </ol>;
 }

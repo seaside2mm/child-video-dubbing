@@ -112,7 +112,7 @@ def test_song_interval_api_validates_and_invalidates_from_transcribe(tmp_path):
         assert updated.status_code == 200
         saved = client.get(f"/api/projects/{project['id']}").json()
         assert saved["metadata"]["separation"]["song_intervals_override"] == [{"start": 0.0, "end": 0.8}]
-        assert saved["checkpoint"]["completed_stages"] == ["probe", "separate"]
+        assert saved["checkpoint"]["completed_stages"] == []
         assert saved["current_stage"] == "transcribe"
 
         invalid = client.put(f"/api/projects/{project['id']}/song-intervals", json={"intervals": [{"start": 0.0, "end": 1.3}]})

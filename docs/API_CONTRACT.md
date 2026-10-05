@@ -5,8 +5,8 @@
 ## 状态约定
 
 - `series.status`: `ready | blocked | error`
-- `project.status`: `created | queued | processing | paused | completed | completed_with_warnings | blocked | failed`
-- `job.status`: `queued | running | paused | completed | completed_with_warnings | blocked | failed | cancelled`
+- `project.status`: `created | queued | processing | awaiting_confirmation | paused | completed | completed_with_warnings | blocked | failed`
+- `job.status`: `queued | running | awaiting_confirmation | paused | completed | completed_with_warnings | blocked | failed | cancelled | superseded`
 - `job.stage`: `probe | separate | transcribe | diarize | characters | rewrite | synthesize | mix | subtitle | export | done`
 - `segment.status`: `pending | rewritten | synthesized | failed | blocked`
 - `anomaly.severity`: `info | warning | blocking`
@@ -111,7 +111,7 @@
 
 ### `GET /api/projects/{project_id}`
 
-返回完整项目摘要、当前 job、段数、异常数、输出文件元数据和可用媒体 URL。
+返回完整项目摘要、当前 job、段数、异常数、输出文件元数据和可用媒体 URL。项目摘要同时返回 `pending_confirmation_stage, pending_confirmation_revision, confirmed_stages, confirmation_history`。`awaiting_confirmation` 表示当前阶段产物已保存，队列已停靠；刷新或服务重启不会自动进入下一阶段。旧 checkpoint 中 `completed_stages` 仅表示阶段曾处理成功，不等同于人工确认。
 
 ## 任务与恢复
 
@@ -123,7 +123,22 @@
 {"kind": "process", "from_stage": "auto", "force": false}
 ```
 
-后端按持久化 checkpoint 恢复；`force=true` 只使当前项目相关阶段失效，不删除源文件。响应 `{job_id, status, stage}`。
+后端按持久化 checkpoint 恢复；`force=true` 只使当前项目相关阶段失效，不删除源文件。响应 `{job_id, status, stage}`。若当前存在待确认阶段，返回 409 `STAGE_CONFIRMATION_REQUIRED`，不能通过普通入队或 `force` 绕过。
+
+### `POST /api/projects/{project_id}/stages/{stage}/confirm`
+
+在已完成阶段的检查卡中显式确认，确认成功后才开始下一阶段。请求：
+
+```json
+{
+  "revision": 1,
+  "accepted_warning_ids": ["anomaly-..."]
+}
+```
+
+`revision` 必须与当前待确认版本一致；警告 ID 必须与当前阶段待接受警告完全相符，代表用户已查看并接受。所属阶段是当前阶段或更早阶段的未解决阻断会返回 409；后续阶段的阻断不会锁死前序历史结果复核。阶段不匹配或过期版本同样返回 409，且不推进队列。重复提交同阶段、同版本确认是幂等的，不会重复排队。确认历史追加写入 checkpoint，包含阶段、revision、接受的警告、确认时间和后续失效信息；仍存在的已接受警告不会在每一关重复要求接受。
+
+最后的 `export` 阶段还必须提交 `artifact_sha256`。后端重新校验源视频 SHA、候选文件存在及候选 SHA；只有通过确认才把项目设为 `completed` 或 `completed_with_warnings`。响应为 `{status, stage, idempotent, next_stage}`；非末阶段确认返回 `queued`，且只启动紧接的下一阶段。
 
 ### `GET /api/jobs/{job_id}`
 
@@ -150,7 +165,7 @@
 
 ### `POST /api/jobs/{job_id}/retry`
 
-从最近一个可恢复 checkpoint 重试，或使用 `{ "from_stage": "rewrite" }` 指定阶段。旧 job 保留审计记录。
+从最近一个可恢复 checkpoint 重试，或使用 `{ "from_stage": "rewrite" }` 指定阶段。存在待确认阶段时只允许重做当前阶段，不能重试到其他阶段或跳过确认；旧 job 保留审计记录。重做阶段会使其自身及下游产物/确认失效。
 
 ## 片段、异常与媒体
 
@@ -189,19 +204,19 @@
 
 ### `GET /api/projects/{project_id}/anomalies`
 
-返回异常数组，字段为 `id, segment_id, kind, severity, blocking, message, action, resolved, details`。
+返回异常数组，字段为 `id, segment_id, kind, severity, blocking, message, action, resolved, details, stage`。`stage` 标识异常所属阶段；旧数据缺少归属时会按异常类型推断，仍无法推断时为 `null` 并按当前待确认项保守处理。
 
 ### `GET /api/projects/{project_id}/media/{kind}`
 
-`kind` 支持 `source | output | segment/{segment_id} | subtitle`。只允许访问当前项目目录内的已登记文件；不存在或未完成时返回 404/409。
+`kind` 支持 `source | candidate | output | segment/{segment_id} | subtitle | stem/{speech|background|music|effects} | mix`。只允许访问当前项目目录内的已登记文件；不存在或未完成时返回 404/409。`candidate` 仅供本机阶段预览；`output` 正式下载只在最终 `export` 阶段已人工确认、且文件哈希仍与确认记录一致后开放。
 
 ### `GET /api/projects/{project_id}/preview`
 
-返回 `{source_url, output_url, duration, subtitle_url, ready, warnings}`，供网页播放器使用。
+返回 `{source_url, output_url, output_sha256, speech_url, background_url, music_url, effects_url, mix_url, duration, subtitle_url, ready, warnings}`，供网页播放器和阶段检查卡使用。候选视频在最终确认前可以通过 `output_url`（`media/candidate`）预览；正式输出 URL（`media/output`）在最终确认前拒绝访问，确认后仍会校验文件哈希。
 
 ### `POST /api/projects/{project_id}/export`
 
-请求可传 `{ "burn_subtitles": true }`。只在所有阻断异常解决且真实成片存在时返回候选文件信息；否则返回 409，明确阻断原因。
+请求可传 `{ "burn_subtitles": true }`。此接口只正式下载已人工确认的成片；候选文件应通过 preview 本地预览。若尚未最终确认、存在阻断异常或真实成片不存在，返回 409 并说明阻断原因。
 
 ## 角色库
 

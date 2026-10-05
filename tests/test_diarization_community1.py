@@ -28,6 +28,7 @@ def test_missing_hub_dependency_is_not_reported_as_missing_token(monkeypatch):
 
 
 def test_pcm_reader_preserves_channel_order_rate_and_amplitude(tmp_path):
+    pytest.importorskip("numpy", reason="Community-1 model runtime dependency is optional")
     path = tmp_path / "stereo.wav"
     with wave.open(str(path), "wb") as output:
         output.setparams((2, 2, 44100, 0, "NONE", "not compressed"))
