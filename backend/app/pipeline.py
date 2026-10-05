@@ -27,6 +27,10 @@ from .db import Database, dump, load, new_id, now_iso
 
 
 STAGES = ("probe", "separate", "transcribe", "diarize", "characters", "rewrite", "synthesize", "mix", "subtitle", "export")
+DIARIZATION_PREROLL_SEC = 0.08
+MAX_DIALOGUE_TAIL_SEC = 1.0
+SUBTITLE_MASK_PREROLL_SEC = 0.3
+SUBTITLE_MASK_TAIL_SEC = 0.8
 
 # A successful stage has just re-validated its own artifacts. Keep this list
 # narrow so persistent warnings (songs, unverified cross-episode voices) stay
@@ -313,8 +317,46 @@ class Pipeline:
             action = "先人工复核或调整 diarization 分段后重试；不会把低证据簇自动合并成少数角色"
             self._record_anomaly(project["id"], None, "DIARIZATION_FRAGMENTED", "blocking", True, message, action, details)
             raise BlockedError("DIARIZATION_FRAGMENTED", message, action, details)
-        for row in mapped:
-            self.db.update("segments", {"speaker_key": row.get("speaker_key"), "metadata_json": dump({**load(row.get("metadata_json"), {}), "speaker_raw": row.get("speaker_raw"), "speaker_embedding": row.get("speaker_embedding"), "speaker_embedding_model": row.get("speaker_embedding_model")})}, "id = ?", (row["id"],))
+        ordered = sorted(mapped, key=lambda row: int(row["segment_index"]))
+        duration = float(project.get("duration") or 0)
+        for row in ordered:
+            metadata = load(row.get("metadata_json"), {})
+            metadata = {**metadata, "speaker_raw": row.get("speaker_raw"), "speaker_embedding": row.get("speaker_embedding"), "speaker_embedding_model": row.get("speaker_embedding_model")}
+            row["metadata_json"] = dump(metadata)
+            if row.get("kind") == "dialogue" and row.get("voice_activity_start_sec") is not None and row.get("voice_activity_end_sec") is not None:
+                asr_start, asr_end = float(row["start_sec"]), float(row["end_sec"])
+                voice_start = float(row["voice_activity_start_sec"])
+                voice_end = float(row["voice_activity_end_sec"])
+                aligned_start = max(asr_start, voice_start - DIARIZATION_PREROLL_SEC)
+                row["start_sec"] = aligned_start
+                row["_timing_alignment"] = {
+                    "asr_start_sec": asr_start,
+                    "asr_end_sec": asr_end,
+                    "voice_start_sec": voice_start,
+                    "voice_end_sec": voice_end,
+                    "start_sec": aligned_start,
+                }
+        for index, row in enumerate(ordered):
+            alignment = row.pop("_timing_alignment", None)
+            if alignment:
+                available_end = min(duration or float("inf"), max(alignment["asr_end_sec"], alignment["voice_end_sec"] + MAX_DIALOGUE_TAIL_SEC))
+                next_row = next((candidate for candidate in ordered[index + 1:] if candidate.get("kind") in {"dialogue", "song"}), None)
+                if next_row:
+                    next_start = float(next_row.get("start_sec", next_row.get("start", 0)))
+                    if next_start > alignment["start_sec"]:
+                        available_end = min(available_end, next_start)
+                if available_end <= alignment["start_sec"]:
+                    available_end = min(duration or float("inf"), alignment["start_sec"] + 0.2)
+                row["end_sec"] = available_end
+                metadata = load(row.get("metadata_json"), {})
+                metadata["timing_alignment"] = {**alignment, "available_end_sec": available_end}
+                row["metadata_json"] = dump(metadata)
+        for row in ordered:
+            values = {"speaker_key": row.get("speaker_key"), "metadata_json": row.get("metadata_json")}
+            if row.get("kind") == "dialogue" and row.get("metadata_json"):
+                if (load(row["metadata_json"], {}).get("timing_alignment") or {}).get("available_end_sec") is not None:
+                    values.update({"start_sec": row["start_sec"], "end_sec": row["end_sec"]})
+            self.db.update("segments", values, "id = ?", (row["id"],))
         context["metadata"]["diarization"] = str(output)
 
     def _characters(self, context: dict[str, Any]) -> None:
@@ -350,23 +392,32 @@ class Pipeline:
                 character = self.db.fetchone("SELECT * FROM characters WHERE id = ?", (character_id,))
             if not character:
                 continue
-            speaker_rows = sorted(speaker_rows, key=lambda item: float(item["end_sec"]) - float(item["start_sec"]), reverse=True)
+            def sample_bounds(item: dict[str, Any]) -> tuple[float, float]:
+                alignment = load(item.get("metadata_json"), {}).get("timing_alignment") or {}
+                start = float(alignment.get("voice_start_sec", item["start_sec"]))
+                end = float(alignment.get("voice_end_sec", item["end_sec"]))
+                return max(0.0, start - 0.05), end + 0.05
+
+            speaker_rows = sorted(speaker_rows, key=lambda item: sample_bounds(item)[1] - sample_bounds(item)[0], reverse=True)
             sample_dir = chars_dir / character["id"]
             sample_dir.mkdir(parents=True, exist_ok=True)
             selected: list[dict[str, Any]] = []
             for candidate in speaker_rows:
-                if all(min(float(candidate["end_sec"]), float(item["end_sec"])) - max(float(candidate["start_sec"]), float(item["start_sec"])) <= 0.05 for item in selected):
-                    selected.append(candidate)
+                candidate_start, candidate_end = sample_bounds(candidate)
+                if all(min(candidate_end, float(item["sample_end_sec"])) - max(candidate_start, float(item["sample_start_sec"])) <= 0.05 for item in selected):
+                    selected.append({**candidate, "sample_start_sec": candidate_start, "sample_end_sec": candidate_end})
                 if len(selected) == 2:
                     break
             if not selected:
-                selected = speaker_rows[:1]
+                candidate = speaker_rows[0]
+                candidate_start, candidate_end = sample_bounds(candidate)
+                selected = [{**candidate, "sample_start_sec": candidate_start, "sample_end_sec": candidate_end}]
             if not character.get("main_sample_path"):
-                main = extract_audio(self.settings.ffmpeg, Path(str(context["metadata"]["separation"]["speech"])), sample_dir / "main.wav", start=float(selected[0]["start_sec"]), duration=float(selected[0]["end_sec"]) - float(selected[0]["start_sec"]), mono=True, sample_rate=24000)
+                main = extract_audio(self.settings.ffmpeg, Path(str(context["metadata"]["separation"]["speech"])), sample_dir / "main.wav", start=float(selected[0]["sample_start_sec"]), duration=float(selected[0]["sample_end_sec"]) - float(selected[0]["sample_start_sec"]), mono=True, sample_rate=24000)
                 backup = None
                 if len(selected) > 1:
                     try:
-                        backup = extract_audio(self.settings.ffmpeg, Path(str(context["metadata"]["separation"]["speech"])), sample_dir / "backup.wav", start=float(selected[1]["start_sec"]), duration=float(selected[1]["end_sec"]) - float(selected[1]["start_sec"]), mono=True, sample_rate=24000)
+                        backup = extract_audio(self.settings.ffmpeg, Path(str(context["metadata"]["separation"]["speech"])), sample_dir / "backup.wav", start=float(selected[1]["sample_start_sec"]), duration=float(selected[1]["sample_end_sec"]) - float(selected[1]["sample_start_sec"]), mono=True, sample_rate=24000)
                     except AdapterError:
                         backup = None
                 self.db.update("characters", {"main_sample_path": str(main), "backup_sample_path": str(backup) if backup else None, "updated_at": now_iso()}, "id = ?", (character["id"],))
@@ -416,7 +467,10 @@ class Pipeline:
             if not character or not character.get("voice_profile"):
                 raise BlockedError("VOICE_PROFILE_MISSING", f"片段 {row['id']} 没有已验证 voice profile", "先完成角色建档")
             text = str(row["target_text"]).strip()
-            limit = max(0.01, float(row["end_sec"]) - float(row["start_sec"]))
+            alignment = load(row.get("metadata_json"), {}).get("timing_alignment") or {}
+            start_sec = float(alignment.get("start_sec", row["start_sec"]))
+            available_end = float(alignment.get("available_end_sec", row["end_sec"]))
+            limit = max(0.01, available_end - start_sec)
             if limit < 0.2:
                 message = f"片段 {row['id']} 的原时间窗仅 {limit:.3f} 秒，短于真实配音可验证下限"
                 details = {"window_seconds": limit, "minimum_seconds": 0.2, "source_text": row.get("source_text"), "target_text": text}
@@ -460,7 +514,8 @@ class Pipeline:
                 self.db.update("segments", {"target_text": current_text, "target_revision": target_revision, "audio_path": None, "audio_sha256": None, "duration_delta": None, "status": "rewritten", "error_message": None, "updated_at": now_iso()}, "id = ?", (row["id"],))
             if not generated:
                 raise BlockedError("TTS_NO_OUTPUT", f"片段 {row['id']} 没有生成音频")
-            self.db.update("segments", {"target_text": current_text, "target_revision": target_revision, "audio_path": str(generated), "audio_sha256": sha256_file(generated), "duration_delta": measured_duration - limit, "voice_profile": character.get("voice_profile"), "status": "synthesized", "error_message": None, "updated_at": now_iso()}, "id = ?", (row["id"],))
+            final_end = min(available_end, start_sec + measured_duration)
+            self.db.update("segments", {"target_text": current_text, "target_revision": target_revision, "end_sec": final_end, "audio_path": str(generated), "audio_sha256": sha256_file(generated), "duration_delta": measured_duration - limit, "voice_profile": character.get("voice_profile"), "status": "synthesized", "error_message": None, "updated_at": now_iso()}, "id = ?", (row["id"],))
 
     def _mix(self, context: dict[str, Any]) -> None:
         project = context["project"]
@@ -498,13 +553,39 @@ class Pipeline:
         subtitle = Path(str(context["metadata"].get("subtitle_path") or self._work(project) / "target.srt"))
         if not mixed.is_file() or not subtitle.is_file():
             raise BlockedError("EXPORT_INPUT_MISSING", "混音或目标字幕不存在，拒绝导出")
-        output = mux_candidate(self.settings.ffmpeg, self._source(project), mixed, subtitle, self._work(project) / "candidate.mp4")
+        mask_intervals = self._subtitle_mask_intervals(project, context)
+        output = mux_candidate(
+            self.settings.ffmpeg,
+            self._source(project),
+            mixed,
+            subtitle,
+            self._work(project) / "candidate.mp4",
+            mask_intervals=mask_intervals,
+        )
         output_info = probe_media(self.settings.ffprobe, output)
         source_duration = float(project.get("duration") or context["metadata"].get("probe", {}).get("duration") or 0)
         if float(output_info.get("duration") or 0) + 0.05 < source_duration:
             raise BlockedError("EXPORT_TRUNCATED", "候选成片短于源视频，拒绝报告为完成", "检查混音时长与 FFmpeg 编码参数")
         self._set_project(project["id"], output_path=str(output), output_sha256=sha256_file(output))
         context["metadata"]["output"] = str(output)
+
+    def _subtitle_mask_intervals(self, project: dict[str, Any], context: dict[str, Any]) -> list[dict[str, float]]:
+        duration = float(project.get("duration") or context["metadata"].get("probe", {}).get("duration") or 0)
+        separation = context["metadata"].get("separation") or {}
+        intervals = [dict(item) for item in (separation.get("song_intervals") or [])]
+        rows = self.db.fetchall(
+            "SELECT start_sec, end_sec, metadata_json FROM segments WHERE project_id = ? AND kind = 'dialogue'",
+            (project["id"],),
+        )
+        for row in rows:
+            alignment = load(row.get("metadata_json"), {}).get("timing_alignment") or {}
+            starts = [float(row["start_sec"]), float(alignment.get("voice_start_sec", row["start_sec"])), float(alignment.get("asr_start_sec", row["start_sec"]))]
+            ends = [float(row["end_sec"]), float(alignment.get("voice_end_sec", row["end_sec"])), float(alignment.get("asr_end_sec", row["end_sec"]))]
+            start = max(0.0, min(starts) - SUBTITLE_MASK_PREROLL_SEC)
+            end = min(duration or float("inf"), max(ends) + SUBTITLE_MASK_TAIL_SEC)
+            if end > start:
+                intervals.append({"start": start, "end": end})
+        return self._merge_song_intervals(intervals)
 
     def _mix_export_dependencies(self, project: dict[str, Any], context: dict[str, Any]) -> None:
         self._mix(context)

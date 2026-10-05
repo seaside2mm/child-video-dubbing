@@ -247,15 +247,14 @@ class DiarizationAdapter:
         for segment in segments:
             start = float(segment["start_sec"] if "start_sec" in segment else segment["start"])
             end = float(segment["end_sec"] if "end_sec" in segment else segment["end"])
-            best = None
-            best_overlap = 0.0
+            overlaps_by_speaker: dict[str, list[tuple[dict[str, Any], float]]] = {}
             for turn in diarization:
                 overlap = max(0.0, min(end, turn["end"]) - max(start, turn["start"]))
-                if overlap > best_overlap:
-                    best_overlap = overlap
-                    best = turn
-            if best:
-                raw = best["speaker"]
+                if overlap > 0:
+                    overlaps_by_speaker.setdefault(str(turn["speaker"]), []).append((turn, overlap))
+            if overlaps_by_speaker:
+                raw, matches = max(overlaps_by_speaker.items(), key=lambda item: sum(overlap for _turn, overlap in item[1]))
+                best, _ = max(matches, key=lambda item: item[1])
                 # A profile_id is an embedding-backed cross-episode identity.
                 # Only external/legacy labels remain project-scoped.
                 profile_id = best.get("profile_id") or best.get("speaker_key")
@@ -268,6 +267,11 @@ class DiarizationAdapter:
                 segment["speaker_raw"] = raw
                 segment["speaker_embedding"] = best.get("embedding")
                 segment["speaker_embedding_model"] = best.get("embedding_model")
+                if segment.get("kind") == "dialogue":
+                    substantial = [(turn, overlap) for turn, overlap in matches if overlap >= 0.18]
+                    activity = substantial or matches
+                    segment["voice_activity_start_sec"] = min(max(start, float(turn["start"])) for turn, _overlap in activity)
+                    segment["voice_activity_end_sec"] = max(min(end, float(turn["end"])) for turn, _overlap in activity)
             else:
                 segment["speaker_key"] = None
         return segments

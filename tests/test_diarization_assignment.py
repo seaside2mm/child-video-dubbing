@@ -19,3 +19,17 @@ def test_different_episodes_do_not_share_random_cluster_identity():
 def test_no_overlapping_turn_is_not_assigned():
     result = DiarizationAdapter.assign([{"start_sec": 10, "end_sec": 11}], [], "a")
     assert result[0]["speaker_key"] is None
+
+
+def test_activity_bounds_ignore_tiny_conflicting_boundary_turn():
+    rows = [{"id": "line", "start_sec": 1.0, "end_sec": 3.0, "kind": "dialogue"}]
+    turns = [
+        {"start": 1.0, "end": 1.08, "speaker": "noise"},
+        {"start": 1.2, "end": 2.7, "speaker": "speaker"},
+    ]
+
+    result = DiarizationAdapter.assign(rows, turns, "episode")
+
+    assert result[0]["speaker_key"] == "episode:speaker"
+    assert result[0]["voice_activity_start_sec"] == 1.2
+    assert result[0]["voice_activity_end_sec"] == 2.7

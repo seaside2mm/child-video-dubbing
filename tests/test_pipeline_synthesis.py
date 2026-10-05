@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from backend.app.adapters.base import BlockedError
+from backend.app.adapters.diarization import DiarizationAdapter
 from backend.app.config import settings as default_settings
 from backend.app.db import Database, now_iso
 from backend.app.pipeline import Pipeline
@@ -71,6 +73,39 @@ def test_over_duration_rewrites_at_most_twice_and_remeasures(tmp_path, monkeypat
     assert saved["target_text"] == "候选1"
     assert saved["target_revision"] == 2
     assert saved["status"] == "synthesized"
+    assert saved["end_sec"] == pytest.approx(0.7)
+
+
+def test_diarize_moves_asr_window_to_voice_and_caps_tail_at_next_line(tmp_path):
+    pipeline, db, project, first = make_fixture(tmp_path)
+    db.update("projects", {"duration": 6.0}, "id = ?", (project["id"],))
+    now = now_iso()
+    second_id = "segment-second"
+    db.insert("segments", {"id": second_id, "project_id": project["id"], "segment_index": 1, "start_sec": 1.5, "end_sec": 2.0, "speaker_key": None, "speaker_name": None, "kind": "dialogue", "source_text": "There", "target_text": None, "target_language": "zh-CN", "speed": 1.0, "duration_delta": None, "voice_profile": None, "audio_path": None, "audio_sha256": None, "status": "pending", "source_revision": 1, "target_revision": 1, "error_message": None, "metadata_json": "{}", "created_at": now, "updated_at": now})
+
+    class Diarizer:
+        def diarize(self, _audio_path, _output_path):
+            return [
+                {"start": 0.5, "end": 0.9, "speaker": "speaker-a"},
+                {"start": 1.6, "end": 1.9, "speaker": "speaker-b"},
+            ]
+
+        assign = staticmethod(DiarizationAdapter.assign)
+
+    pipeline.diarizer = Diarizer()
+    context = {"project": db.fetchone("SELECT * FROM projects WHERE id = ?", (project["id"],)), "metadata": {"separation": {"speech": str(tmp_path / "speech.wav")}}}
+
+    pipeline._diarize(context)
+
+    saved_first = db.fetchone("SELECT * FROM segments WHERE id = ?", (first["id"],))
+    saved_second = db.fetchone("SELECT * FROM segments WHERE id = ?", (second_id,))
+    timing = json.loads(saved_first["metadata_json"])["timing_alignment"]
+    assert saved_first["start_sec"] == pytest.approx(0.42)
+    assert saved_first["end_sec"] == pytest.approx(1.52)
+    assert timing["asr_start_sec"] == 0.0
+    assert timing["voice_start_sec"] == 0.5
+    assert timing["available_end_sec"] == pytest.approx(saved_first["end_sec"])
+    assert saved_second["start_sec"] == pytest.approx(1.52)
 
 
 def test_over_duration_blocks_after_two_rewrites_without_truncation(tmp_path, monkeypatch):

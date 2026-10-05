@@ -259,12 +259,36 @@ def restore_song_intervals(
     return output
 
 
-def mux_candidate(ffmpeg: str, source: Path, background: Path, subtitles: Path, output: Path) -> Path:
+def mux_candidate(
+    ffmpeg: str,
+    source: Path,
+    background: Path,
+    subtitles: Path,
+    output: Path,
+    *,
+    mask_intervals: list[dict[str, float]] | None = None,
+) -> Path:
     """Mux original video and a new audio track, burning only target-language subtitles."""
     output.parent.mkdir(parents=True, exist_ok=True)
     # The subtitle path is created under the project work directory. Escape the characters
     # understood by FFmpeg's subtitles filter while keeping Chinese filenames valid.
     subtitle_arg = str(subtitles).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
+    filters: list[str] = []
+    valid_intervals = sorted(
+        (
+            max(0.0, float(item["start"])),
+            float(item["end"]),
+        )
+        for item in (mask_intervals or [])
+        if float(item["end"]) > max(0.0, float(item["start"]))
+    )
+    if valid_intervals:
+        enabled = "+".join(f"between(t,{start:.3f},{end:.3f})" for start, end in valid_intervals)
+        filters.append(
+            "drawbox=x=iw*0.22:y=ih*0.84:w=iw*0.56:h=ih*0.10:color=black:t=fill:"
+            f"enable='{enabled}'"
+        )
+    filters.append(f"subtitles='{subtitle_arg}':force_style='MarginV=25,BorderStyle=1,Outline=2,Shadow=0'")
     command = [
         ffmpeg,
         "-y",
@@ -272,7 +296,7 @@ def mux_candidate(ffmpeg: str, source: Path, background: Path, subtitles: Path, 
         "-i", str(background),
         "-map", "0:v:0",
         "-map", "1:a:0",
-        "-vf", f"subtitles='{subtitle_arg}'",
+        "-vf", ",".join(filters),
         "-c:v", "libx264",
         "-preset", "veryfast",
         "-crf", "20",
