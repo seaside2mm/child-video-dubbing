@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from array import array
 import json
+import math
+import wave
 from dataclasses import replace
 from pathlib import Path
 
@@ -8,6 +11,7 @@ import pytest
 
 from backend.app.adapters.base import BlockedError
 from backend.app.adapters.diarization import DiarizationAdapter
+from backend.app.adapters.media import probe_media
 from backend.app.config import settings as default_settings
 from backend.app.db import Database, now_iso
 from backend.app.pipeline import Pipeline
@@ -37,6 +41,29 @@ class FakeRewriter:
         return [{"id": segments[0]["id"], "target_text": f"候选{len(self.calls)}"}]
 
 
+def write_tone_wav(path: Path, sections: list[tuple[float, int]]) -> Path:
+    sample_rate = 24000
+    samples = array("h")
+    sample_index = 0
+    for duration, amplitude in sections:
+        count = round(duration * sample_rate)
+        if amplitude:
+            samples.extend(
+                int(amplitude * math.sin(2 * math.pi * 440 * index / sample_rate))
+                for index in range(sample_index, sample_index + count)
+            )
+        else:
+            samples.extend([0] * count)
+        sample_index += count
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(sample_rate)
+        output.writeframes(samples.tobytes())
+    return path
+
+
 def make_fixture(tmp_path, *, end: float = 1.0):
     settings = replace(default_settings, root_dir=tmp_path, work_dir=tmp_path / "work", db_path=tmp_path / "db.sqlite3")
     db = Database(settings.db_path)
@@ -59,6 +86,7 @@ def test_over_duration_rewrites_at_most_twice_and_remeasures(tmp_path, monkeypat
     rewriter = FakeRewriter()
     pipeline.tts = tts
     pipeline.rewriter = rewriter
+    monkeypatch.setattr(pipeline_module, "trim_edge_silence", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(pipeline_module, "probe_media", lambda _ffprobe, path: {"duration": tts.duration_by_path[str(path)]})
     monkeypatch.setattr(pipeline_module, "sha256_file", lambda _path: "audio-hash")
 
@@ -108,13 +136,23 @@ def test_diarize_moves_asr_window_to_voice_and_caps_tail_at_next_line(tmp_path):
     assert saved_second["start_sec"] == pytest.approx(1.52)
 
 
-def test_over_duration_blocks_after_two_rewrites_without_truncation(tmp_path, monkeypatch):
+def test_over_duration_blocks_after_two_rewrites_without_truncation(tmp_path):
     pipeline, db, project, segment = make_fixture(tmp_path)
-    tts = FakeTTS([1.2, 1.1, 1.1])
+
+    class LongTTS:
+        def __init__(self):
+            self.durations = [1.2, 1.1, 1.1]
+            self.calls: list[str] = []
+
+        def generate(self, text: str, output: Path, **_kwargs):
+            duration = self.durations[len(self.calls)]
+            self.calls.append(text)
+            return write_tone_wav(output, [(duration, 6000)])
+
+    tts = LongTTS()
     rewriter = FakeRewriter()
     pipeline.tts = tts
     pipeline.rewriter = rewriter
-    monkeypatch.setattr(pipeline_module, "probe_media", lambda _ffprobe, path: {"duration": tts.duration_by_path[str(path)]})
 
     with pytest.raises(BlockedError) as caught:
         pipeline._synthesize_segments(project, [segment])
@@ -126,6 +164,54 @@ def test_over_duration_blocks_after_two_rewrites_without_truncation(tmp_path, mo
     assert saved["status"] == "blocked"
     assert saved["duration_delta"] == pytest.approx(0.1)
     assert saved["audio_path"] is None
+    assert saved["end_sec"] == pytest.approx(segment["end_sec"])
+    last_audio = Path(project["work_dir"]) / "segments" / "segment-test-r3.wav"
+    assert probe_media(default_settings.ffprobe, last_audio)["duration"] == pytest.approx(1.1)
+
+
+def test_edge_silence_is_trimmed_before_duration_gate_and_alignment_is_preserved(tmp_path):
+    pipeline, db, project, segment = make_fixture(tmp_path, end=1.391)
+    start_sec, available_end_sec = 0.5, 1.891
+    alignment = {"start_sec": start_sec, "available_end_sec": available_end_sec}
+    db.update(
+        "segments",
+        {"start_sec": start_sec, "end_sec": available_end_sec, "metadata_json": json.dumps({"timing_alignment": alignment})},
+        "id = ?",
+        (segment["id"],),
+    )
+    segment = db.fetchone("SELECT * FROM segments WHERE id = ?", (segment["id"],))
+
+    class EdgeSilenceTTS:
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def generate(self, text: str, output: Path, **_kwargs):
+            self.calls.append(text)
+            return write_tone_wav(output, [(0.189, 0), (0.650, 6000), (0.058, 0), (0.598, 6000), (0.105, 0)])
+
+    tts = EdgeSilenceTTS()
+    rewriter = FakeRewriter()
+    pipeline.tts = tts
+    pipeline.rewriter = rewriter
+
+    pipeline._synthesize_segments(project, [segment])
+
+    saved = db.fetchone("SELECT * FROM segments WHERE id = ?", (segment["id"],))
+    audio_path = Path(saved["audio_path"])
+    duration = probe_media(default_settings.ffprobe, audio_path)["duration"]
+    assert len(tts.calls) == 1
+    assert rewriter.calls == []
+    assert saved["status"] == "synthesized"
+    assert saved["start_sec"] == pytest.approx(start_sec)
+    assert duration == pytest.approx(1.386, abs=0.01)
+    assert duration <= available_end_sec - start_sec
+    assert saved["end_sec"] == pytest.approx(start_sec + duration, abs=0.005)
+
+    with wave.open(str(audio_path), "rb") as trimmed:
+        samples = array("h")
+        samples.frombytes(trimmed.readframes(trimmed.getnframes()))
+    assert max(abs(sample) for sample in samples[int(0.69 * 24000):int(0.74 * 24000)]) == 0
+    assert max(abs(sample) for sample in samples[int(0.05 * 24000):int(0.06 * 24000)]) > 0
 
 
 def test_short_asr_window_blocks_before_tts_or_rewriter(tmp_path):

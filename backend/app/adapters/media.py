@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any, Iterable
@@ -58,6 +59,81 @@ def probe_media(ffprobe: str, path: Path) -> dict[str, Any]:
         "audio_streams": sum(1 for s in streams if s.get("codec_type") == "audio"),
         "streams": streams,
     }
+
+
+def trim_edge_silence(
+    ffmpeg: str,
+    path: Path,
+    duration: float,
+    *,
+    threshold_db: float = -45.0,
+    minimum_silence: float = 0.08,
+    padding: float = 0.04,
+) -> bool:
+    """Remove only detected leading/trailing silence, keeping a short audio margin."""
+    duration = float(duration)
+    if duration <= 0:
+        return False
+    result = _run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-i",
+            str(path),
+            "-af",
+            f"silencedetect=noise={threshold_db}dB:d={minimum_silence}",
+            "-f",
+            "null",
+            "-",
+        ]
+    )
+    events: list[tuple[float, float]] = []
+    pending_start: float | None = None
+    for line in result.stderr.splitlines():
+        start_match = re.search(r"silence_start:\s*([0-9]+(?:\.[0-9]+)?)", line)
+        if start_match:
+            pending_start = float(start_match.group(1))
+            continue
+        end_match = re.search(r"silence_end:\s*([0-9]+(?:\.[0-9]+)?)", line)
+        if end_match and pending_start is not None:
+            events.append((pending_start, float(end_match.group(1))))
+            pending_start = None
+    if pending_start is not None:
+        events.append((pending_start, duration))
+    if not events:
+        return False
+
+    trim_start = 0.0
+    trim_end = duration
+    if events[0][0] <= 0.02:
+        trim_start = max(0.0, events[0][1] - padding)
+    if events[-1][1] >= duration - 0.02:
+        trim_end = min(duration, events[-1][0] + padding)
+    if trim_start <= 0 and trim_end >= duration:
+        return False
+    if trim_end - trim_start < 0.2:
+        return False
+
+    temporary = path.with_name(f"{path.stem}.edge-trimmed{path.suffix}")
+    try:
+        _run(
+            [
+                ffmpeg,
+                "-y",
+                "-i",
+                str(path),
+                "-af",
+                f"atrim=start={trim_start:.6f}:end={trim_end:.6f},asetpts=PTS-STARTPTS",
+                "-c:a",
+                "pcm_s16le",
+                str(temporary),
+            ]
+        )
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return True
 
 
 def extract_audio(

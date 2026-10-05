@@ -17,6 +17,7 @@ from .adapters.media import (
     probe_media,
     restore_song_intervals,
     sha256_file,
+    trim_edge_silence,
     write_srt,
 )
 from .adapters.omnivoice import OmniVoiceAdapter
@@ -521,6 +522,10 @@ class Pipeline:
                 measured_duration = float(info.get("duration") or 0)
                 if measured_duration <= 0:
                     raise BlockedError("TTS_NO_OUTPUT", f"片段 {row['id']} 没有可验证的音频时长")
+                if trim_edge_silence(self.settings.ffmpeg, generated, measured_duration):
+                    measured_duration = float(probe_media(self.settings.ffprobe, generated).get("duration") or 0)
+                    if measured_duration <= 0:
+                        raise BlockedError("TTS_NO_OUTPUT", f"片段 {row['id']} 裁除首尾静音后没有可验证的音频时长")
                 if measured_duration <= limit + 0.06:
                     break
                 if attempt == 2:
