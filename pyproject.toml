@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "child-video-dubbing"
-version = "0.1.0"
+version = "1.0.0"
 description = "本地儿童视频分级配音工具"
 requires-python = ">=3.11"
 dependencies = [

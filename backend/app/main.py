@@ -158,7 +158,7 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
         yield
         runtime.queue.stop()
 
-    app = FastAPI(title="童声配音台", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="童声配音台", version="1.0.0", lifespan=lifespan)
     app.state.runtime = runtime
     app.add_middleware(CORSMiddleware, allow_origins=["http://127.0.0.1:5173", "http://localhost:5173", "http://127.0.0.1:8787", "http://localhost:8787"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
