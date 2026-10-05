@@ -100,7 +100,8 @@ export function Dashboard({ data, onNewSeries, onImport, onNavigate }) {
 }
 
 function SegmentPeek({ segments }) {
-  const item = segments.find((segment) => segment.exception || segment.duration_delta > 0) || segments[0];
+  const dialogue = segments.filter((segment) => segment.kind === "dialogue");
+  const item = dialogue.find((segment) => segment.exception || segment.duration_delta > 0) || dialogue[0];
   if (!item) return <div className="segment-peek"><div className="section-title"><h2>当前片段示例</h2></div><p className="quiet-empty">尚无句级结果。</p></div>;
   return <div className="segment-peek"><div className="section-title"><h2>当前片段示例</h2></div><div className="segment-peek-grid"><span><small>原文</small>{item.source_text || item.original_text || "—"}</span><span><small>目标文本</small>{item.target_text || "—"}</span><span><small>角色</small>{item.speaker_name || item.character_name || item.speaker_key || "待匹配"}</span><span className={Number(item.duration_delta) > 0 ? "over" : ""}><small>时长差</small>{item.duration_delta == null ? "—" : `${Number(item.duration_delta) > 0 ? "+" : ""}${Number(item.duration_delta).toFixed(2)} 秒`}</span></div></div>;
 }
