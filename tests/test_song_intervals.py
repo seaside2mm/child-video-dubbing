@@ -31,7 +31,7 @@ def test_detect_songs_keeps_and_merges_manual_override(tmp_path, monkeypatch):
     runtime.touch()
     script.touch()
     (work_dir / "song-detection-input.wav").touch()
-    detected = {"status": "no_song", "model": "YAMNet", "song_intervals": [{"start": 2.0, "end": 5.0}]}
+    detected = {"status": "detected", "model": "YAMNet", "song_intervals": [{"start": 2.0, "end": 5.0}]}
 
     def fake_run(command, **_kwargs):
         Path(command[-1]).write_text(json.dumps(detected), encoding="utf-8")
@@ -39,15 +39,25 @@ def test_detect_songs_keeps_and_merges_manual_override(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline_module, "_run", fake_run)
     pipeline = Pipeline(settings, db)
     context = {"project": db.fetchone("SELECT * FROM projects WHERE id = ?", (project_id,)), "metadata": {"separation": {"speech": "speech.wav", "background": "background.wav", "song_intervals_override": [{"start": 0.0, "end": 3.0}]}}}
+    pipeline._record_anomaly(project_id, None, "SONG_DETECTION_UNCERTAIN", "warning", False, "歌曲需要复核", "试听原片", {})
 
     pipeline._detect_songs(context)
     assert context["metadata"]["separation"]["song_intervals"] == [{"start": 0.0, "end": 5.0}]
     assert context["metadata"]["separation"]["song_intervals_detected"] == detected["song_intervals"]
-    assert context["metadata"]["separation"]["song_detection"]["status"] == "no_song"
+    assert context["metadata"]["separation"]["song_detection"]["status"] == "detected"
     assert context["metadata"]["separation"]["song_detection"]["manual_override_count"] == 1
+    resolved = db.fetchone("SELECT resolved FROM anomalies WHERE project_id = ? AND kind = 'SONG_DETECTION_UNCERTAIN'", (project_id,))
+    assert resolved["resolved"] == 1
 
     pipeline._detect_songs(context)
     assert context["metadata"]["separation"]["song_intervals"] == [{"start": 0.0, "end": 5.0}]
+
+    context["metadata"]["separation"]["song_intervals_override"] = []
+    detected.update(status="no_song", song_intervals=[])
+    pipeline._detect_songs(context)
+    warning = db.fetchone("SELECT * FROM anomalies WHERE project_id = ? AND kind = 'SONG_DETECTION_UNCERTAIN' AND resolved = 0", (project_id,))
+    assert warning["severity"] == "warning"
+    assert warning["blocking"] == 0
 
 
 def test_transcribe_marks_as_song_dialogue_starting_inside_manual_interval(tmp_path, monkeypatch):

@@ -278,9 +278,19 @@ class Pipeline:
         separation["song_intervals_detected"] = detected_intervals
         separation["song_intervals"] = self._merge_song_intervals([*detected_intervals, *manual_intervals])
         separation["song_detection"] = {"status": detection["status"], "model": detection["model"], "evidence": str(output), "manual_override_count": len(manual_intervals)}
-        if detection["status"] == "low_confidence":
+        if manual_intervals:
+            self.db.execute(
+                "UPDATE anomalies SET resolved = 1, updated_at = ? WHERE project_id = ? AND kind = 'SONG_DETECTION_UNCERTAIN' AND resolved = 0",
+                (now_iso(), project["id"]),
+            )
+        elif detection["status"] in {"low_confidence", "no_song"}:
+            message = (
+                "歌曲检测置信度较低；请复核歌曲边界"
+                if detection["status"] == "low_confidence"
+                else "自动检测未找到歌曲；请确认原片中是否有需保留的歌曲"
+            )
             self._record_anomaly(project["id"], None, "SONG_DETECTION_UNCERTAIN", "warning", False,
-                                 "存在接近阈值的歌唱事件；请复核歌曲边界", "试听候选片段", {"evidence": str(output)})
+                                 message, "试听原片；如有歌曲请标记区间，无歌曲则确认此告警", {"evidence": str(output)})
 
     @staticmethod
     def _merge_song_intervals(intervals: list[dict[str, Any]]) -> list[dict[str, float]]:
@@ -367,6 +377,8 @@ class Pipeline:
             by_speaker.setdefault(str(row["speaker_key"]), []).append(row)
         series = self.db.fetchone("SELECT * FROM series WHERE id = ?", (project["series_id"],)) or {}
         chars_dir = self._work(project) / "characters"
+        used_character_names: set[str] = set()
+        used_character_ids: set[str] = set()
         for speaker_key, speaker_rows in by_speaker.items():
             character = self.db.fetchone("SELECT * FROM characters WHERE series_id = ? AND speaker_key = ?", (project["series_id"], speaker_key))
             embedding = next((self._embedding(load(item.get("metadata_json"), {}).get("speaker_embedding")) for item in speaker_rows if self._embedding(load(item.get("metadata_json"), {}).get("speaker_embedding"))), None)
@@ -376,20 +388,39 @@ class Pipeline:
             if not character and embedding:
                 # Different clusters from this episode must not be collapsed
                 # again by the cross-episode library matcher.
-                for candidate in self.db.fetchall("SELECT * FROM characters WHERE series_id = ? AND embedding_path IS NOT NULL AND source_project_id != ?", (project["series_id"], project["id"])):
+                best_character = None
+                best_similarity = 0.78
+                for candidate in self.db.fetchall(
+                    "SELECT c.* FROM characters c "
+                    "WHERE c.series_id = ? AND c.embedding_path IS NOT NULL AND c.source_project_id != ? "
+                    "AND EXISTS (SELECT 1 FROM segments s WHERE s.project_id = c.source_project_id "
+                    "AND s.kind = 'dialogue' AND s.speaker_key = c.speaker_key) ORDER BY c.id",
+                    (project["series_id"], project["id"]),
+                ):
+                    if candidate["id"] in used_character_ids:
+                        continue
                     if not self._same_embedding_model(embedding_model, load(candidate.get("metadata_json"), {}).get("embedding_model")):
                         continue
                     candidate_embedding = self._embedding_file(candidate.get("embedding_path"))
-                    if candidate_embedding and self._cosine(embedding, candidate_embedding) >= 0.78:
-                        character = candidate
-                        break
+                    similarity = self._cosine(embedding, candidate_embedding) if candidate_embedding else -1.0
+                    if similarity >= best_similarity and (best_character is None or similarity > best_similarity):
+                        best_character = candidate
+                        best_similarity = similarity
+                if best_character:
+                    character = best_character
             if not character:
                 character_id = new_id("character")
                 now = now_iso()
-                self.db.insert("characters", {"id": character_id, "series_id": project["series_id"], "speaker_key": speaker_key, "name": f"角色 {len(self.db.fetchall('SELECT id FROM characters WHERE series_id = ?', (project['series_id'],))) + 1}", "status": "candidate", "source_project_id": project["id"], "metadata_json": dump({"embedding_verified": any(load(x.get("metadata_json"), {}).get("speaker_embedding") for x in speaker_rows)}), "created_at": now, "updated_at": now})
+                role_number = 1
+                while f"角色 {role_number}" in used_character_names:
+                    role_number += 1
+                character_name = f"角色 {role_number}"
+                self.db.insert("characters", {"id": character_id, "series_id": project["series_id"], "speaker_key": speaker_key, "name": character_name, "status": "candidate", "source_project_id": project["id"], "metadata_json": dump({"embedding_verified": any(load(x.get("metadata_json"), {}).get("speaker_embedding") for x in speaker_rows)}), "created_at": now, "updated_at": now})
                 character = self.db.fetchone("SELECT * FROM characters WHERE id = ?", (character_id,))
             if not character:
                 continue
+            used_character_ids.add(str(character["id"]))
+            used_character_names.add(str(character.get("name") or ""))
             def sample_bounds(item: dict[str, Any]) -> tuple[float, float]:
                 alignment = load(item.get("metadata_json"), {}).get("timing_alignment") or {}
                 start = float(alignment.get("voice_start_sec", item["start_sec"]))
