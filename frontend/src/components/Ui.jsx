@@ -32,7 +32,7 @@ export function ProgressSteps({ project, jobs }) {
     ["rewrite", "改写"], ["synthesize", "配音"], ["mix", "混音"], ["subtitle", "字幕"], ["export", "输出"],
   ];
   const job = jobs.find((item) => String(item.project_id) === String(project?.id));
-  const current = project?.current_stage || project?.stage || job?.stage || "probe";
+  const current = job?.stage || project?.current_stage || project?.stage || "probe";
   const index = Math.max(steps.findIndex(([id]) => id === current), 0);
   const complete = ["completed", "completed_with_warnings"].includes(project?.status) || job?.status === "completed";
   const progress = Math.max(0, Math.min(1, Number(job?.progress ?? project?.progress ?? 0)));
