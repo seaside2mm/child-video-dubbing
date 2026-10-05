@@ -33,6 +33,7 @@ def test_ensure_model_loaded_accepts_explicit_already_loaded_conflict(monkeypatc
 
     def fake_post(url, **kwargs):
         requests.append(url)
+        assert kwargs["timeout"] == 300
         return response
 
     monkeypatch.setattr(faster_whisper.httpx, "post", fake_post)

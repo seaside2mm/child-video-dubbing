@@ -256,8 +256,6 @@ class Pipeline:
                 "INSERT INTO segments (id, project_id, segment_index, start_sec, end_sec, speaker_key, speaker_name, kind, source_text, target_text, target_language, speed, duration_delta, voice_profile, audio_path, audio_sha256, status, source_revision, target_revision, error_message, metadata_json, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 values,
             )
-        for row in self.db.fetchall("SELECT * FROM segments WHERE project_id = ? AND kind = 'song'", (project["id"],)):
-            self._record_anomaly(project["id"], row["id"], "SONG_UNREWRITTEN", "warning", False, "歌曲区间未生成改写字幕或配音", "检查原歌曲及其中是否夹有对白", {})
         context["metadata"]["transcript"] = str(transcript_path)
 
     def _detect_songs(self, context: dict[str, Any]) -> None:

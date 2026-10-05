@@ -77,6 +77,7 @@ def test_transcribe_marks_as_song_dialogue_starting_inside_manual_interval(tmp_p
     rows = db.fetchall("SELECT kind, source_text, metadata_json FROM segments WHERE project_id = ? ORDER BY segment_index", (project_id,))
     assert [row["kind"] for row in rows] == ["song", "dialogue"]
     assert json.loads(rows[0]["metadata_json"])["song_interval_override"] is True
+    assert db.fetchone("SELECT 1 FROM anomalies WHERE project_id = ? AND kind = 'SONG_UNREWRITTEN'", (project_id,)) is None
 
 
 def test_song_interval_api_validates_and_invalidates_from_transcribe(tmp_path):

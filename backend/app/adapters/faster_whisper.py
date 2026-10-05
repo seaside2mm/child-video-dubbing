@@ -34,7 +34,9 @@ class FasterWhisperAdapter:
         except (httpx.HTTPError, ValueError):
             pass
         try:
-            response = httpx.post(f"{self.settings.faster_whisper_url}/api/ps/{model_id}", timeout=30)
+            # Speaches loads the model synchronously; the first cold load can
+            # outlast 30 seconds and raise a misleading connection timeout.
+            response = httpx.post(f"{self.settings.faster_whisper_url}/api/ps/{model_id}", timeout=300)
         except httpx.HTTPError as exc:
             raise RemoteServiceError("FASTER_WHISPER_UNAVAILABLE", "faster-whisper 模型生命周期接口不可达", "检查 8001 服务", {"error": exc.__class__.__name__}) from exc
         already_loaded = False
