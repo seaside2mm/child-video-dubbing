@@ -104,6 +104,24 @@ describe("Dashboard", () => {
     expect(screen.getAllByRole("button", { name: "开始逐项复核" })).toHaveLength(2);
   });
 
+  it("starts the selected preview from the overview试听 button", () => {
+    const play = vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue();
+    render(<Dashboard
+      data={{
+        selectedProject: { id: "project-1", title: "Episode", status: "processing", current_stage: "probe" },
+        jobs: [], health: { connected: true, services: {} }, projects: [],
+        preview: { source_url: "/source.mp4" }, segments: [], anomalies: [], characters: [], act: vi.fn(),
+      }}
+      onNewSeries={() => {}}
+      onImport={() => {}}
+      onNavigate={() => {}}
+    />);
+
+    fireEvent.click(screen.getByRole("button", { name: "试听" }));
+    expect(play).toHaveBeenCalledOnce();
+    play.mockRestore();
+  });
+
   it("shows subtitle timing beside its matching dialogue and audio for review", () => {
     const onNavigate = vi.fn();
     render(<Dashboard

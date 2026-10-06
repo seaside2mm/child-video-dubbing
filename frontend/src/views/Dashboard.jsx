@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, resolveUrl } from "../api";
 import { Icon } from "../icons";
 import { Button, EmptyState, ProgressSteps, StatusDot } from "../components/Ui";
@@ -27,6 +27,7 @@ export function Dashboard({ data, onNewSeries, onImport, onNavigate }) {
   const services = data.health.services || {};
   const [exporting, setExporting] = useState(false);
   const [downloadUrl, setDownloadUrl] = useState("");
+  const previewVideoRef = useRef(null);
   useEffect(() => setDownloadUrl(""), [project?.id]);
 
   const continueProject = () => data.act(() => api.enqueue(project.id), "处理任务已加入本地队列；进度会以真实阶段更新。");
@@ -91,10 +92,10 @@ export function Dashboard({ data, onNewSeries, onImport, onNavigate }) {
         <section className="preview-panel panel">
           <h2>预览与检查</h2>
           <div className="video-frame">
-            {project && data.health.connected && previewSource ? <video controls preload="metadata" src={resolveUrl(previewSource)}/> : <div><Icon name="play" size={32}/><span>{project ? "检查完成后可预览" : "完成混音后可预览"}</span></div>}
+            {project && data.health.connected && previewSource ? <video ref={previewVideoRef} controls preload="metadata" src={resolveUrl(previewSource)}/> : <div><Icon name="play" size={32}/><span>{project ? "检查完成后可预览" : "完成混音后可预览"}</span></div>}
           </div>
           <div className="preview-label">{previewReady ? "候选成片预览" : data.preview?.source_url ? "源片预览（尚无候选成片）" : "尚无可用媒体"}</div>
-          <div className="preview-actions"><Button variant="secondary" icon="play" disabled={!project || !previewSource}>试听</Button><Button icon="download" busy={exporting} onClick={exportProject} disabled={!project || !data.health.connected || !previewReady || !exportConfirmed}>{exportConfirmed ? "下载已验收 MP4" : "最终确认后可下载"}</Button></div>
+          <div className="preview-actions"><Button variant="secondary" icon="play" onClick={() => previewVideoRef.current?.play()} disabled={!project || !previewSource}>试听</Button><Button icon="download" busy={exporting} onClick={exportProject} disabled={!project || !data.health.connected || !previewReady || !exportConfirmed}>{exportConfirmed ? "下载已验收 MP4" : "最终确认后可下载"}</Button></div>
           {downloadUrl && <a className="download-result" href={downloadUrl} download>下载已验收 MP4</a>}
           {data.preview?.subtitle_url && <a className="subtitle-result" href={resolveUrl(data.preview.subtitle_url)} download>下载目标语言字幕</a>}
           <dl className="preview-meta"><div><dt>项目状态</dt><dd>{project ? statusText[project.status] || project.status || "未知" : "未选择"}</dd></div><div><dt>目标语言</dt><dd>{project?.target_language || "—"}</dd></div><div><dt>分级</dt><dd>{project?.level || project?.target_level || "—"}</dd></div><div><dt>语速</dt><dd>{project?.speed != null ? `${project.speed}×` : "—"}</dd></div></dl>
