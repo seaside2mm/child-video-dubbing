@@ -126,6 +126,7 @@ function StageReview({ project, stage, job, data, onNavigate, legacyReview = fal
   const blockers = anomalies.filter((item) => (item.blocking || item.severity === "blocking") && (!item.stage || orderedStages.indexOf(item.stage) <= currentIndex));
   const warnings = anomalies.filter((item) => !item.blocking && item.severity !== "blocking" && (!item.stage || item.stage === stage) && !acceptedEarlierWarnings.has(item.id));
   const segments = data.segments.filter((segment) => segment.kind === "dialogue");
+  const subtitleSegments = segments.filter((segment) => String(segment.target_text || "").trim());
   const metadata = project?.metadata || {};
   const probe = metadata.probe || {};
   const separation = metadata.separation || {};
@@ -133,6 +134,13 @@ function StageReview({ project, stage, job, data, onNavigate, legacyReview = fal
   const nextStage = orderedStages[currentIndex + 1];
   const canRetry = failed && job?.id && stage !== "done";
   const finalStage = stage === "export";
+  const missingAudioCount = stage === "synthesize"
+    ? segments.filter((segment) => !segment.audio_url).length
+    : stage === "subtitle"
+      ? subtitleSegments.filter((segment) => !segment.audio_url).length
+      : 0;
+  const missingSubtitle = stage === "subtitle" && !data.preview?.subtitle_url;
+  const reviewIncomplete = missingAudioCount > 0 || missingSubtitle;
 
   const confirm = () => data.act(() => api.confirmStage(project.id, stage, {
     revision,
@@ -142,7 +150,7 @@ function StageReview({ project, stage, job, data, onNavigate, legacyReview = fal
   const retry = () => job?.id && data.act(() => api.retryJob(job.id, stage), "本阶段已重新排队；此前阶段结果保留。 ");
 
   if (!project) return null;
-  const rows = segments.slice(0, 80);
+  const rows = stage === "subtitle" ? segments : segments.slice(0, 80);
 
   return <section className="stage-review" id="stage-review" aria-labelledby="stage-review-title">
     <div className="stage-review-head">
@@ -157,7 +165,10 @@ function StageReview({ project, stage, job, data, onNavigate, legacyReview = fal
         {["transcribe", "diarize", "rewrite", "synthesize"].includes(stage) && <SegmentReviewTable stage={stage} segments={rows} project={project}/>}
         {stage === "characters" && <div className="character-review-list">{data.characters.map((character) => <article key={character.id}><div><strong>{character.name || character.speaker_key}</strong><small>{character.speaker_key} · {character.status || "状态未知"}</small></div><span>{character.voice_profile || "尚无音色映射"}</span>{character.main_sample_url ? <audio controls preload="none" src={resolveUrl(character.main_sample_url)} aria-label={`${character.name}主样本试听`}/> : <small>无主样本</small>}</article>)}{!data.characters.length && <p className="quiet-empty">尚无角色档案；检查本阶段异常后再确认。</p>}</div>}
         {stage === "mix" && (data.preview?.mix_url ? <div className="mix-review"><strong>混音候选试听</strong><audio controls preload="none" src={resolveUrl(data.preview.mix_url)} aria-label="混音候选试听"/><small>请确认背景音乐、音效及原歌曲仍保留，人物对白替换符合预期。</small></div> : <p className="quiet-empty">混音轨尚未生成，不能确认。</p>)}
-        {stage === "subtitle" && (data.preview?.subtitle_url ? <div className="subtitle-review"><p>成片只显示目标语言字幕。</p><a href={resolveUrl(data.preview.subtitle_url)} download>查看 / 下载字幕文件</a><pre>{segments.filter((item) => item.target_text).slice(0, 8).map((item) => item.target_text).join("\n") || "字幕内容尚未读取"}</pre></div> : <p className="quiet-empty">字幕文件尚未生成，不能确认。</p>)}
+        {stage === "subtitle" && <>
+          <div className="subtitle-review"><p>逐条核对原文、字幕时间和实际配音；成片只显示目标语言字幕，歌曲保留原音。</p>{data.preview?.subtitle_url ? <a href={resolveUrl(data.preview.subtitle_url)} download>下载 SRT 字幕文件</a> : <small>字幕文件尚未生成。</small>}</div>
+          <SegmentReviewTable stage="subtitle" segments={rows.filter((item) => String(item.target_text || "").trim())} project={project}/>
+        </>}
         {stage === "export" && (data.preview?.output_url ? <div className="candidate-review"><video controls preload="metadata" src={resolveUrl(data.preview.output_url)} aria-label="候选成片预览"/><small>这是待验收候选版。预览后点击“确认成片并完成”，之后才开放正式下载。</small><code>SHA-256: {data.preview.output_sha256 || project.output_sha256 || "未记录"}</code></div> : <p className="quiet-empty">候选成片尚未生成，不能最终确认。</p>)}
         {stage === "probe" && data.preview?.source_url && <video className="source-review-video" controls preload="metadata" src={resolveUrl(data.preview.source_url)} aria-label="源视频预览"/>}
         {!waiting && !failed && !legacyReview && <div className="stage-running-note" role="status">本阶段完成后会自动停住，等待你的确认。</div>}
@@ -168,14 +179,16 @@ function StageReview({ project, stage, job, data, onNavigate, legacyReview = fal
         <p><strong>{stage === "characters" ? data.characters.length : segments.length}</strong> {stage === "characters" ? "个角色档案" : "条对白片段"}</p>
         <p className={blockers.length ? "check-blocked" : ""}><strong>{blockers.length}</strong> 项阻断异常</p>
         <p className={warnings.length ? "check-warning" : ""}><strong>{warnings.length}</strong> 项待接受警告</p>
+        {reviewIncomplete && <p className="check-blocked" role="alert"><strong>暂不能确认：</strong>{missingSubtitle ? "字幕文件不可用。" : `${missingAudioCount} 条字幕没有对应的实际配音。`}</p>}
         {blockers.length > 0 && <ul className="stage-anomaly-list blocking">{blockers.map((item) => <li key={item.id}>{item.message || item.kind}</li>)}</ul>}
         {warnings.length > 0 && <ul className="stage-anomaly-list">{warnings.map((item) => <li key={item.id}>{item.message || item.kind}</li>)}</ul>}
+        {stage === "subtitle" && <Button variant="ghost" onClick={() => onNavigate("series")}>编辑字幕 / 配音</Button>}
         {(blockers.length || warnings.length) ? <Button variant="secondary" onClick={() => onNavigate("exceptions")}>打开异常详情</Button> : null}
         {!["probe", "separate", "mix", "subtitle", "export"].includes(stage) && <Button variant="ghost" onClick={() => onNavigate("series")}>到项目页检查 / 编辑</Button>}
       </aside>
     </div>
 
-    {waiting && <div className="stage-review-actions"><div><strong>{blockers.length ? "先解决阻断异常" : warnings.length ? "确认表示你已查看并接受以上警告" : "本阶段结果将保留"}</strong><small>{blockers.length ? "阻断项解决并重新复核后才能继续。" : finalStage ? "最终确认会绑定当前候选文件的 SHA-256。" : `下一步：${stageNames[nextStage] || "完成"}`}</small></div><Button icon="refresh" variant="secondary" onClick={retry} disabled={!job?.id}>重新处理本阶段</Button><Button icon="chevron" onClick={confirm} disabled={blockers.length > 0 || (finalStage && !data.preview?.output_sha256 && !project.output_sha256)}>{finalStage ? "确认成片并完成" : "确认并进入下一步"}</Button></div>}
+    {waiting && <div className="stage-review-actions"><div><strong>{blockers.length ? "先解决阻断异常" : reviewIncomplete ? "结果不完整，暂不能确认" : warnings.length ? "确认表示你已查看并接受以上警告" : "本阶段结果将保留"}</strong><small>{blockers.length ? "阻断项解决并重新复核后才能继续。" : reviewIncomplete ? "先补齐字幕文件或对应配音，再进行人工复核。" : finalStage ? "最终确认会绑定当前候选文件的 SHA-256。" : `下一步：${stageNames[nextStage] || "完成"}`}</small></div><Button icon="refresh" variant="secondary" onClick={retry} disabled={!job?.id}>重新处理本阶段</Button><Button icon="chevron" onClick={confirm} disabled={blockers.length > 0 || reviewIncomplete || (finalStage && !data.preview?.output_sha256 && !project.output_sha256)}>{finalStage ? "确认成片并完成" : "确认并进入下一步"}</Button></div>}
     {legacyReview && <div className="stage-review-actions"><div><strong>已有结果需要人工复核</strong><small>只恢复第一个未确认阶段，不会重跑有效缓存，也不会越过本阶段确认。</small></div><Button icon="play" onClick={() => data.act(() => api.enqueue(project.id), "已开始逐项复核；第一个阶段结果生成后会停下等你确认。")}>开始逐项复核</Button></div>}
     {canRetry && <div className="stage-review-actions"><div><strong>本阶段未完成</strong><small>修复异常后重试本阶段；之前确认的上游结果会保留。</small></div><Button icon="refresh" onClick={retry}>重试当前阶段</Button></div>}
     {!waiting && !failed && !finished && ["created", "paused", "cancelled", "completed", "completed_with_warnings"].includes(project.status) && <div className="stage-review-actions"><div><strong>{project.status.startsWith("completed") ? "已有候选结果" : "尚未开始当前阶段"}</strong><small>继续后仍会在本阶段停下，等待你确认。</small></div><Button icon="play" onClick={() => data.act(() => api.enqueue(project.id), "任务已加入本地队列。")}>{project.status.startsWith("completed") ? "逐项复核已有结果" : "继续任务"}</Button></div>}
@@ -183,13 +196,14 @@ function StageReview({ project, stage, job, data, onNavigate, legacyReview = fal
 }
 
 function SegmentReviewTable({ stage, segments, project }) {
-  const reviewColumns = stage === "transcribe" ? ["时间", "原始识别文本", "分类"] : stage === "diarize" ? ["时间", "说话人", "原文"] : stage === "rewrite" ? ["原文", "目标文本", "语言等级"] : ["原文 / 目标文本", "角色与时间", "配音试听 / 时长差"];
+  const reviewColumns = stage === "transcribe" ? ["时间", "原始识别文本", "分类"] : stage === "diarize" ? ["时间", "说话人", "原文"] : stage === "rewrite" ? ["原文", "目标文本", "语言等级"] : stage === "subtitle" ? ["字幕时间 / 角色", "原文参考 / 成片字幕", "对应配音试听"] : ["原文 / 目标文本", "角色与时间", "配音试听 / 时长差"];
   return <div className={`stage-segment-table ${stage}`} aria-label={`${stageNames[stage]}结果`}>
     <div className="stage-segment-header">{reviewColumns.map((column) => <strong key={column}>{column}</strong>)}</div>
     {segments.map((item) => <article key={item.id}>
       {stage === "transcribe" && <><span>{formatTime(item.start)}–{formatTime(item.end)}</span><p>{item.source_text || "—"}</p><span>{item.kind === "song" ? "歌曲（保留原音）" : "对白"}</span></>}
       {stage === "diarize" && <><span>{formatTime(item.start)}–{formatTime(item.end)}</span><strong>{item.speaker_name || item.speaker_key || "待分配"}</strong><p>{item.source_text || "—"}</p></>}
       {stage === "rewrite" && <><p>{item.source_text || "—"}</p><p>{item.target_text || "尚未改写"}</p><span>{project.level || project.target_level || "—"} · {project.target_language || "—"}</span></>}
+      {stage === "subtitle" && <><div><span>{formatSubtitleTime(item.start)}–{formatSubtitleTime(item.end)}</span><small>{item.speaker_name || item.speaker_key || "未分配角色"}</small></div><div className="subtitle-comparison"><small>原文：{item.source_text || "—"}</small><strong>字幕：{item.target_text || "字幕文本缺失"}</strong></div><div className="stage-segment-audio">{item.audio_url ? <audio controls preload="none" src={resolveUrl(item.audio_url)} aria-label={`第 ${item.index + 1} 条配音试听`}/> : <small>没有可试听的实际配音</small>}</div></>}
       {stage === "synthesize" && <><div><p>{item.source_text || "—"}<br/><strong>{item.target_text || "尚无目标文本"}</strong></p></div><span>{item.speaker_name || item.speaker_key || "待分配"}<br/>{formatTime(item.start)}–{formatTime(item.end)}</span><div className="stage-segment-audio">{item.audio_url ? <audio controls preload="none" src={resolveUrl(item.audio_url)} aria-label={`片段 ${item.index + 1} 配音试听`}/> : <small>无可用配音</small>}<small>{item.duration_delta == null ? "未测时长" : `时长差 ${Number(item.duration_delta).toFixed(2)} 秒`}</small></div></>}
     </article>)}
     {!segments.length && <p className="quiet-empty">本阶段尚无可展示的对白结果。</p>}
@@ -200,4 +214,12 @@ function SegmentReviewTable({ stage, segments, project }) {
 function formatTime(value) {
   const seconds = Number(value || 0);
   return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
+}
+
+function formatSubtitleTime(value) {
+  const seconds = Math.max(0, Number(value || 0));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainder = (seconds % 60).toFixed(3).padStart(6, "0");
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${remainder}`;
 }

@@ -107,3 +107,11 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   .progress-steps { grid-template-columns: repeat(10, minmax(54px, 1fr)); }
   .segment-table-header, .segment-row { grid-template-columns: 140px minmax(120px, 1fr) minmax(150px, 1.2fr) 110px minmax(160px, 1.4fr); }
 }
+.stage-segment-table.subtitle article, .stage-segment-table.subtitle .stage-segment-header { grid-template-columns: 112px minmax(0, 1.35fr) minmax(170px, 0.9fr); }
+.stage-segment-table.subtitle article > div:first-child, .subtitle-comparison { display: grid; gap: 4px; min-width: 0; }
+.stage-segment-table.subtitle article small, .subtitle-comparison small { color: var(--muted); font-size: 10px; }
+.subtitle-comparison strong { line-height: 1.5; overflow-wrap: anywhere; }
+@media (max-width: 760px) {
+  .stage-segment-table.subtitle article { grid-template-columns: 1fr; }
+  .stage-segment-table.subtitle .stage-segment-header { display: none; }
+}

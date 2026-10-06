@@ -103,4 +103,75 @@ describe("Dashboard", () => {
     expect(screen.queryByText("本阶段完成后会自动停住，等待你的确认。")).not.toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "开始逐项复核" })).toHaveLength(2);
   });
+
+  it("shows subtitle timing beside its matching dialogue and audio for review", () => {
+    const onNavigate = vi.fn();
+    render(<Dashboard
+      data={{
+        selectedProject: { id: "project-1", title: "Episode", status: "awaiting_confirmation", current_stage: "subtitle", pending_confirmation_stage: "subtitle", pending_confirmation_revision: 2, checkpoint: { completed_stages: ["subtitle"], confirmed_stages: ["probe", "separate", "transcribe", "diarize", "characters", "rewrite", "synthesize", "mix"], pending_confirmation_stage: "subtitle", pending_confirmation_revision: 2 } },
+        jobs: [{ id: "job-1", project_id: "project-1", status: "awaiting_confirmation", stage: "subtitle" }],
+        health: { connected: true, services: {} },
+        projects: [],
+        preview: { subtitle_url: "/target.srt" },
+        segments: [
+          { id: "line-1", index: 0, kind: "dialogue", start: 5.2, end: 6.7, source_text: "Hello there.", target_text: "你好。", speaker_name: "Bear", audio_url: "/line-1.wav" },
+          { id: "song-1", index: 1, kind: "song", start: 7, end: 9, source_text: "Song lyric", target_text: "歌曲歌词" },
+        ],
+        anomalies: [],
+        characters: [],
+        act: vi.fn(),
+      }}
+      onNewSeries={() => {}}
+      onImport={() => {}}
+      onNavigate={onNavigate}
+    />);
+
+    expect(screen.getByText("00:00:05.200–00:00:06.700")).toBeInTheDocument();
+    expect(screen.getByText("原文：Hello there.")).toBeInTheDocument();
+    expect(screen.getByText("字幕：你好。")).toBeInTheDocument();
+    expect(screen.getByLabelText("第 1 条配音试听")).toHaveAttribute("src", "/line-1.wav");
+    expect(screen.getByRole("link", { name: "下载 SRT 字幕文件" })).toHaveAttribute("href", "/target.srt");
+    expect(screen.queryByText("歌曲歌词")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑字幕 / 配音" }));
+    expect(onNavigate).toHaveBeenCalledWith("series");
+  });
+
+  it("shows subtitle cues beyond the old 80-row review limit", () => {
+    const segments = Array.from({ length: 81 }, (_, index) => ({
+      id: `line-${index + 1}`, index, kind: "dialogue", start: index, end: index + 1,
+      source_text: `Source ${index + 1}`, target_text: `字幕 ${index + 1}`, audio_url: `/line-${index + 1}.wav`,
+    }));
+    render(<Dashboard
+      data={{
+        selectedProject: { id: "project-1", title: "Episode", status: "awaiting_confirmation", current_stage: "subtitle", pending_confirmation_stage: "subtitle", pending_confirmation_revision: 1, checkpoint: { completed_stages: ["subtitle"], confirmed_stages: ["probe", "separate", "transcribe", "diarize", "characters", "rewrite", "synthesize", "mix"], pending_confirmation_stage: "subtitle", pending_confirmation_revision: 1 } },
+        jobs: [{ id: "job-1", project_id: "project-1", status: "awaiting_confirmation", stage: "subtitle" }],
+        health: { connected: true, services: {} }, projects: [], preview: { subtitle_url: "/target.srt" },
+        segments, anomalies: [], characters: [], act: vi.fn(),
+      }}
+      onNewSeries={() => {}}
+      onImport={() => {}}
+      onNavigate={() => {}}
+    />);
+
+    expect(screen.getByText("字幕：字幕 81")).toBeInTheDocument();
+  });
+
+  it("prevents subtitle confirmation when an aligned dialogue has no real audio", () => {
+    render(<Dashboard
+      data={{
+        selectedProject: { id: "project-1", title: "Episode", status: "awaiting_confirmation", current_stage: "subtitle", pending_confirmation_stage: "subtitle", pending_confirmation_revision: 1, checkpoint: { completed_stages: ["subtitle"], confirmed_stages: ["probe", "separate", "transcribe", "diarize", "characters", "rewrite", "synthesize", "mix"], pending_confirmation_stage: "subtitle", pending_confirmation_revision: 1 } },
+        jobs: [{ id: "job-1", project_id: "project-1", status: "awaiting_confirmation", stage: "subtitle" }],
+        health: { connected: true, services: {} }, projects: [], preview: { subtitle_url: "/target.srt" },
+        segments: [{ id: "line-1", index: 0, kind: "dialogue", start: 1, end: 2, source_text: "Hello.", target_text: "你好。", audio_url: null }],
+        anomalies: [], characters: [], act: vi.fn(),
+      }}
+      onNewSeries={() => {}}
+      onImport={() => {}}
+      onNavigate={() => {}}
+    />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("1 条字幕没有对应的实际配音");
+    expect(screen.getByRole("button", { name: "确认并进入下一步" })).toBeDisabled();
+  });
 });

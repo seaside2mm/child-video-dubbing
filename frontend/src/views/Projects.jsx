@@ -46,10 +46,10 @@ function SegmentRow({ row, data, project, pendingStage, drafts, setDrafts, save 
   if (row.speaker_key && !options.some((item) => item.speaker_key === row.speaker_key)) options.push({ speaker_key: row.speaker_key, name: row.speaker_name || row.speaker_key });
   const speakerKey = row.speaker_key || "";
   const audioUrl = row.audio_url || (row.status === "synthesized" ? api.mediaUrl(project.id, `segment/${row.id}`) : "");
-  const canEditSpeaker = pendingStage === "characters";
-  const canEditText = pendingStage === "rewrite";
-  const canEditSpeed = pendingStage === "synthesize";
-  const canRegenerate = pendingStage === "synthesize" || (project.status === "completed" && (project.confirmed_stages || project.checkpoint?.confirmed_stages || []).length === 10);
+  const canEditSpeaker = row.kind === "dialogue" && pendingStage === "characters";
+  const canEditText = row.kind === "dialogue" && (pendingStage === "rewrite" || pendingStage === "subtitle");
+  const canEditSpeed = row.kind === "dialogue" && (pendingStage === "synthesize" || pendingStage === "subtitle");
+  const canRegenerate = row.kind === "dialogue" && Boolean(String(row.target_text || "").trim()) && (pendingStage === "synthesize" || (["completed", "completed_with_warnings"].includes(project.status) && (project.confirmed_stages || project.checkpoint?.confirmed_stages || []).length === 10));
   const update = (patch) => setDrafts((value) => ({ ...value, [row.id]: { ...value[row.id], ...patch } }));
   return <article className={`segment-row ${row.status === "failed" || row.status === "blocked" ? "exception" : ""}`}>
     <div><strong>{formatTime(row.start)}–{formatTime(row.end)}</strong>{options.length ? <select aria-label={`片段 ${row.id} 角色`} disabled={!canEditSpeaker} value={speakerKey} onChange={(event) => update({ speaker_key: event.target.value })}><option value="">待匹配角色</option>{options.map((item) => <option key={item.speaker_key || item.id} value={item.speaker_key}>{item.name || item.speaker_key}</option>)}</select> : <input aria-label={`片段 ${row.id} 角色键`} disabled={!canEditSpeaker} value={speakerKey} placeholder="角色键" onChange={(event) => update({ speaker_key: event.target.value })}/>}</div>
